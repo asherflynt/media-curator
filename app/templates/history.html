@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="panel">
+  <h2>Action manifest</h2>
+  <p class="dim" style="margin-top:0">
+    Every action, dry-run or live. Old tier and size are recorded so a demotion can be
+    reversed: set the title back to its original profile and re-search. Note that the
+    original file only exists while it's still inside Radarr's Recycle Bin retention.
+  </p>
+  <div class="scroll"><table>
+    <tr><th>When</th><th>Action</th><th>Title</th><th>From</th>
+        <th class="num">Old size</th><th>Status</th><th>Detail</th></tr>
+    {% for r in rows %}
+    <tr>
+      <td class="dim">{{ r.ts|int|string }}</td>
+      <td>{{ r.action }}{% if r.dry_run %} <span class="pill dry">dry</span>{% endif %}</td>
+      <td>{{ r.title }}</td>
+      <td class="dim">{{ r.old_tier or '' }}</td>
+      <td class="num">{{ '%.1f'|format((r.old_size or 0)/1024**3) }} GB</td>
+      <td class="{{ 'bad' if r.status=='failed' else ('good' if r.status=='grabbed' else 'dim') }}">{{ r.status }}</td>
+      <td class="dim">{{ r.detail or '' }}</td>
+    </tr>
+    {% else %}<tr><td class="dim" colspan="7">No actions recorded.</td></tr>{% endfor %}
+  </table></div>
+</div>
+{% endblock %}

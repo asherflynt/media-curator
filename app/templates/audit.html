@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block body %}
+
+<div class="panel">
+  <h2>Findings</h2>
+  <div class="scroll"><table>
+    <tr><th>Class</th><th class="num">Count</th><th class="num">Bytes</th><th>Meaning</th></tr>
+    {% for c in counts %}
+    <tr>
+      <td><strong>{{ c.klass }}</strong></td>
+      <td class="num">{{ c.n }}</td>
+      <td class="num">{{ '%.0f'|format(c.bytes/1024**3) }} GB</td>
+      <td class="dim">
+        {% if c.klass=='underweight' %}Claims a high tier at a fraction of its cohort's bitrate. Radarr thinks it's at cutoff, so it will never upgrade-search it &mdash; invisible without this check.
+        {% elif c.klass=='bloated' %}Far above its cohort's bitrate. Wasted space, no quality gain.
+        {% elif c.klass=='orphan' %}On disk, unknown to Radarr. Invisible to any API-derived total.
+        {% elif c.klass=='upscale' %}Claims 2160p but carries a 1080p-cohort bitrate.
+        {% elif c.klass=='broken' %}Zero bytes, or no runtime/mediaInfo.
+        {% elif c.klass=='duplicate' %}More than one file for a single item.
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}<tr><td class="dim">No findings yet &mdash; run an audit.</td></tr>{% endfor %}
+  </table></div>
+  <form method="post" action="/audit/run" style="margin-top:14px">
+    <button>Run audit now</button>
+    <span class="dim" style="margin-left:10px">
+      Tagging in Radarr only happens when dry-run is off.
+    </span>
+  </form>
+</div>
+
+<div class="panel">
+  <h2>Flagged files</h2>
+  <p class="dim" style="margin-top:0">
+    Remedies are deliberately manual. <strong>Underweight</strong> files are a quality
+    fix that <em>costs</em> space; <strong>bloated</strong> files are the ones worth
+    re-acquiring at the same tier.
+  </p>
+  <div class="scroll"><table>
+    <tr><th>Class</th><th>Title</th><th class="num">Size</th><th class="num">Ratio</th>
+        <th>Tier</th><th>Codec</th><th></th></tr>
+    {% for f in findings %}
+    <tr>
+      <td><span class="pill">{{ f.klass }}</span></td>
+      <td>{{ f.title }}</td>
+      <td class="num">{{ '%.2f'|format((f.size or 0)/1024**3) }} GB</td>
+      <td class="num {{ 'bad' if f.ratio and f.ratio < 0.4 }}{{ 'warn' if f.ratio and f.ratio > 2.5 }}">
+        {{ '%.2f'|format(f.ratio) + 'x' if f.ratio else '' }}</td>
+      <td class="dim">{{ f.tier or '' }}</td>
+      <td class="dim">{{ f.codec or '' }}</td>
+      <td><form method="post" action="/audit/dismiss/{{ f.id }}">
+        <button class="ghost" type="submit">Dismiss</button></form></td>
+    </tr>
+    {% else %}<tr><td class="dim" colspan="7">Nothing flagged.</td></tr>{% endfor %}
+  </table></div>
+</div>
+{% endblock %}

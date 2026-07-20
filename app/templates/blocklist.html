@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block body %}
+
+<div class="panel">
+  <h2>Blocklist &mdash; never demote</h2>
+  <p class="dim" style="margin-top:0">
+    A hard filter. Anything here is skipped by the loop regardless of its score,
+    the same as carrying the <code>{{ settings.exclusion_tag }}</code> tag in
+    Radarr &mdash; but managed here. Use it for classics that rank high on size
+    and age but you'd never want re-downloaded as a WEB-DL.
+  </p>
+  <form method="get" action="/blocklist" style="display:flex; gap:8px; max-width:520px">
+    <input type="text" name="q" value="{{ q }}" placeholder="Search your library by title to add&hellip;">
+    <button type="submit">Search</button>
+  </form>
+</div>
+
+{% if q %}
+<div class="panel">
+  <h2>Matches for &ldquo;{{ q }}&rdquo;</h2>
+  {% if matches %}
+  <div class="scroll"><table>
+    <tr><th>Title</th><th class="num">Year</th><th>File</th><th></th></tr>
+    {% for m in matches %}
+    <tr>
+      <td>{{ m.title }}</td>
+      <td class="num dim">{{ m.year }}</td>
+      <td class="dim">{{ (((m.movieFile or {}).get('quality') or {}).get('quality') or {}).get('name') or '&mdash;'|safe }}</td>
+      <td style="text-align:right">
+        <form method="post" action="/blocklist/add" style="display:inline">
+          <input type="hidden" name="movie_id" value="{{ m.id }}">
+          <input type="hidden" name="tmdb_id" value="{{ m.tmdbId }}">
+          <input type="hidden" name="title" value="{{ m.title }}">
+          <input type="hidden" name="year" value="{{ m.year }}">
+          <input type="hidden" name="reason" value="manual">
+          <input type="hidden" name="back" value="/blocklist?q={{ q|urlencode }}">
+          <button type="submit" class="ghost">Block</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
+  <p class="dim">No matching titles (or Radarr is unreachable).</p>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2>Blocked ({{ rows|length }})</h2>
+  {% if rows %}
+  <div class="scroll"><table>
+    <tr><th>Title</th><th class="num">Year</th><th>Reason</th><th>Added</th><th></th></tr>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.title or ('movie #' ~ r.movie_id) }}</td>
+      <td class="num dim">{{ r.year or '' }}</td>
+      <td class="dim">{{ r.reason or '' }}</td>
+      <td class="dim">{{ r.added|int|datetimeformat }}</td>
+      <td style="text-align:right">
+        <form method="post" action="/blocklist/remove/{{ r.movie_id }}" style="display:inline">
+          <button type="submit" class="ghost">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
+  <p class="dim">Nothing blocked yet. Add titles from the Candidates page, or search above.</p>
+  {% endif %}
+</div>
+
+{% endblock %}

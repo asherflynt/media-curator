@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block body %}
+{% if saved %}<div class="note ok">Saved.</div>{% endif %}
+
+<div class="panel">
+  <h2>Connections</h2>
+  <p class="dim" style="margin-top:0">
+    Set the Radarr and Sonarr URL + API key here (Radarr/Sonarr &rarr; Settings &rarr;
+    General &rarr; API Key). Stored in the curator's own database &mdash; no more editing
+    <code>.env</code> and rebuilding. An environment variable is used only as a fallback
+    until you save here.
+  </p>
+
+  <form method="post" action="/connections/save">
+    {% for c in [radarr, sonarr] %}
+    <div style="border:1px solid var(--line); border-radius:8px; padding:14px; margin-bottom:14px">
+      <h2 style="margin-top:0">{{ c.name|capitalize }}
+        <span class="pill">{{ c.source }}</span></h2>
+      <div class="grid">
+        <label><span>URL</span>
+          <input type="text" name="{{ c.name }}_url" value="{{ c.url }}"
+                 placeholder="http://{{ c.name|upper }}-HOST:{{ '7878' if c.name=='radarr' else '8989' }}"></label>
+        <label><span>API key {% if c.has_key %}<span class="good">&mdash; set (&hellip;{{ c.key_hint }})</span>{% endif %}</span>
+          <input type="password" name="{{ c.name }}_key" autocomplete="off"
+                 placeholder="{{ 'leave blank to keep current' if c.has_key else 'paste API key' }}"></label>
+      </div>
+      <button type="button" class="ghost" onclick="testConn('{{ c.name }}')">Test</button>
+      <span id="test-{{ c.name }}" class="dim" style="margin-left:10px"></span>
+    </div>
+    {% endfor %}
+    <button type="submit">Save connections</button>
+  </form>
+</div>
+
+<script>
+async function testConn(name){
+  const out=document.getElementById('test-'+name);
+  out.textContent='testing…'; out.className='dim';
+  const url=document.querySelector('[name="'+name+'_url"]').value;
+  const key=document.querySelector('[name="'+name+'_key"]').value;
+  const body=new URLSearchParams({name:name,url:url,key:key});
+  try{
+    const r=await fetch('/connections/test',{method:'POST',body:body});
+    const d=await r.json();
+    if(d.ok){ out.textContent='✓ connected — '+(d.app||name)+' v'+(d.version||'?'); out.className='good'; }
+    else { out.textContent='✗ '+(d.error||'failed'); out.className='bad'; }
+  }catch(e){ out.textContent='✗ '+e; out.className='bad'; }
+}
+</script>
+{% endblock %}

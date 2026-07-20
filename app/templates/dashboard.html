@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block body %}
+
+{% for e in errors %}<div class="note bad"><strong>Error.</strong> {{ e }}</div>{% endfor %}
+
+{% if managed_bad %}
+<div class="note bad">
+  <strong>Managed profile needs attention.</strong>
+  A quality profile the curator manages was edited into a state it can't demote to:
+  {% for p in managed_bad %}<br><code>{{ p.name }}</code> &mdash; {{ p.reason }}{% endfor %}
+  <br><a href="/rules" style="color:var(--accent)">Review on the Rules page</a>.
+</div>
+{% endif %}
+
+{% if mapping and not mapping.ok %}
+<div class="note bad">
+  <strong>Path mapping unverified.</strong> {{ mapping.reason }}<br>
+  Checked {{ mapping.checked }} Radarr paths, {{ mapping.hits }} resolved under
+  <code>{{ status.measured_from if status else '' }}</code>.
+  {% if mapping.misses %}<br><span class="dim">e.g. {{ mapping.misses[0] }}</span>{% endif %}
+</div>
+{% elif mapping and mapping.ok %}
+<div class="note ok"><strong>Path mapping verified.</strong>
+  {{ mapping.hits }}/{{ mapping.checked }} Radarr paths resolve under the mount.</div>
+{% endif %}
+
+{% if status %}
+<div class="panel">
+  <h2>Free space &mdash; measured from {{ status.measured_from }}</h2>
+  <div class="grid">
+    <div><div class="dim">Free now</div>
+      <div class="big {{ 'bad' if status.below_target else 'good' }}">{{ '%.0f'|format(status.free_gb) }}<span class="dim" style="font-size:14px"> GB</span></div></div>
+    <div><div class="dim">Target</div>
+      <div class="big">{{ '%.0f'|format(status.target_gb) }}<span class="dim" style="font-size:14px"> GB</span></div></div>
+    <div><div class="dim">Projected free</div>
+      <div class="big">{{ '%.0f'|format(status.projected_free_gb) }}<span class="dim" style="font-size:14px"> GB</span></div></div>
+    <div><div class="dim">Deficit</div>
+      <div class="big {{ 'warn' if status.action_needed }}">{{ '%.0f'|format(status.deficit_gb) }}<span class="dim" style="font-size:14px"> GB</span></div></div>
+  </div>
+  <div style="margin-top:14px" class="bar">
+    <i style="width:{{ [100,(status.free_gb/status.total_gb*100) if status.total_gb else 0]|min }}%"></i>
+  </div>
+  <p class="dim" style="margin:10px 0 0">
+    {{ '%.0f'|format(status.total_gb) }} GB total &middot;
+    in-flight {{ '%.0f'|format(status.in_flight_gb) }} GB &middot;
+    recycle bin {{ '%.0f'|format(status.recycle_bin_gb) }} GB.
+    Projection counts in-flight and recycle-bin bytes as already reclaimed &mdash;
+    without that the loop would keep demoting while the raw number sat still.
+  </p>
+  <p class="dim" style="margin:6px 0 0">
+    <strong>unRAID note:</strong> the array allocates per disk. This aggregate figure
+    is the right measure for releasing space, but it does not guarantee any single
+    disk can hold a 57 GB file.
+  </p>
+  <form method="post" action="/loop/run" style="margin-top:12px"
+        onsubmit="return confirm('Run the demotion loop now?')">
+    <button>Run loop now</button>
+  </form>
+</div>
+{% endif %}
+
+{% if arr_diskspace %}
+<div class="panel">
+  <h2>Radarr's own disk figures &mdash; shown for comparison, not used</h2>
+  <p class="dim" style="margin-top:0">
+    unRAID's shfs reports free space <em>per share</em>, so these disagree with each
+    other while both being "real". Neither means free space on the array, which is
+    why the loop reads the filesystem instead.
+  </p>
+  <div class="scroll"><table>
+    <tr><th>Path</th><th class="num">Free</th><th class="num">Total</th></tr>
+    {% for d in arr_diskspace %}
+    <tr><td><code>{{ d.path }}</code></td>
+      <td class="num">{{ '%.2f'|format(d.freeSpace/1024**4) }} TiB</td>
+      <td class="num">{{ '%.2f'|format(d.totalSpace/1024**4) }} TiB</td></tr>
+    {% endfor %}
+  </table></div>
+</div>
+{% endif %}
+
+{% if tiers %}
+<div class="panel">
+  <h2>Movie tiers &mdash; {{ '%.0f'|format(tracked_gb) }} GB tracked</h2>
+  <div class="scroll"><table>
+    <tr><th>Tier</th><th class="num">GB</th><th class="num">Files</th><th class="num">Avg GB</th><th></th></tr>
+    {% for t in tiers[:8] %}
+    <tr>
+      <td>{{ t.tier }}</td>
+      <td class="num">{{ '{:,.0f}'.format(t.gb) }}</td>
+      <td class="num">{{ t.count }}</td>
+      <td class="num">{{ '%.1f'|format(t.avg_gb) }}</td>
+      <td style="width:40%"><div class="bar"><i style="width:{{ (t.gb/tiers[0].gb*100)|round }}%"></i></div></td>
+    </tr>
+    {% endfor %}
+  </table></div>
+  <p class="dim" style="margin-bottom:0">
+    Tracked totals exclude orphan folders on disk that Radarr doesn't know about,
+    so this is a floor. See the Audit page.
+  </p>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2>Recent runs</h2>
+  <table>
+    {% for r in runs %}
+    <tr>
+      <td style="width:150px" class="dim">{{ r.ts|int|string }}</td>
+      <td style="width:70px">{{ r.kind }}</td>
+      <td class="{{ 'good' if r.ok else 'bad' }}" style="width:50px">{{ 'ok' if r.ok else 'fail' }}</td>
+      <td>{{ r.summary }}</td>
+    </tr>
+    {% else %}<tr><td class="dim">Nothing yet.</td></tr>{% endfor %}
+  </table>
+</div>
+{% endblock %}

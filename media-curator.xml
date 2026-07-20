@@ -1,0 +1,61 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>media-curator</Name>
+  <Repository>ghcr.io/asherflynt/media-curator:latest</Repository>
+  <Registry>https://github.com/asherflynt/media-curator/pkgs/container/media-curator</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/asherflynt/media-curator/issues</Support>
+  <Project>https://github.com/asherflynt/media-curator</Project>
+  <Overview>media-curator audits your Radarr/Sonarr library for files whose size contradicts the quality they claim to be, and reclaims disk space by demoting over-quality files (e.g. 4K remuxes to 4K WEB-DL) using Radarr's native download-verify-replace path — it NEVER re-encodes. Free space is read from the filesystem (statvfs), not Radarr's per-share numbers, so it works correctly on unRAID/ZFS.
+
+Configure Radarr and Sonarr in the WebUI (Connections) — no environment variables or config files needed. Set a free-space target and the loop holds it. Rule-based profile assignment (by genre, collection, or tag) keeps groups like kids movies on the right archive profile automatically. Protect anything with a blocklist and a keep-tag. Starts in dry-run.
+
+IMPORTANT: mount your media share READ-ONLY at /media, pointed at the real dataset/share that holds your movies, so free space and orphan detection are accurate. media-curator never writes to it — Radarr performs the file operations.</Overview>
+  <Category>MediaApp:Video Tools: Downloaders:</Category>
+  <WebUI>http://[IP]:[PORT:8420]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/asherflynt/media-curator/main/media-curator.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/asherflynt/media-curator/main/icon.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Description>Reclaim disk space in your Radarr/Sonarr library by demoting over-quality files (4K remux -&gt; 4K WEB-DL, etc.) without re-encoding. Configure everything in the WebUI. Starts in dry-run.</Description>
+  <Networking>
+    <Mode>bridge</Mode>
+    <Publish>
+      <Port>
+        <HostPort>8420</HostPort>
+        <ContainerPort>8420</ContainerPort>
+        <Protocol>tcp</Protocol>
+      </Port>
+    </Publish>
+  </Networking>
+  <Data>
+    <Volume>
+      <HostDir>/mnt/user/appdata/media-curator</HostDir>
+      <ContainerDir>/data</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/mnt/user/media</HostDir>
+      <ContainerDir>/media</ContainerDir>
+      <Mode>ro</Mode>
+    </Volume>
+  </Data>
+  <Environment>
+    <Variable>
+      <Value>America/New_York</Value>
+      <Name>TZ</Name>
+      <Mode/>
+    </Variable>
+  </Environment>
+  <Config Name="WebUI Port" Target="8420" Default="8420" Mode="tcp" Description="Web interface port." Type="Port" Display="always" Required="true" Mask="false">8420</Config>
+  <Config Name="Appdata (config + database)" Target="/data" Default="/mnt/user/appdata/media-curator" Mode="rw" Description="Where media-curator stores its SQLite database, settings, and action history." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/media-curator</Config>
+  <Config Name="Media (read-only)" Target="/media" Default="/mnt/user/media" Mode="ro" Description="Your media share, mounted READ-ONLY. media-curator reads true free space (statvfs) and detects orphan folders here; it never writes. Point this at the real dataset/share that holds your movies (e.g. /mnt/cluster/Media on a ZFS pool) for accurate free-space readings." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/media</Config>
+  <Config Name="Timezone" Target="TZ" Default="America/New_York" Mode="" Description="Container timezone (affects scheduled run times shown in the UI)." Type="Variable" Display="advanced" Required="false" Mask="false">America/New_York</Config>
+</Container>

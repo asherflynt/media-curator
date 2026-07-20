@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block body %}
+{% if request.query_params.get('saved') %}<div class="note ok">Saved.</div>{% endif %}
+
+<form method="post" action="/settings">
+<div class="panel">
+  <h2>Free space</h2>
+  <div class="grid">
+    <label><span>Free space target (GB)</span>
+      <input type="number" name="free_space_target_gb" value="{{ settings.free_space_target_gb }}"></label>
+    <label><span>Hysteresis band (GB)</span>
+      <input type="number" name="hysteresis_gb" value="{{ settings.hysteresis_gb }}"></label>
+    <label><span>Loop interval (minutes)</span>
+      <input type="number" name="loop_interval_minutes" value="{{ settings.loop_interval_minutes }}"></label>
+  </div>
+  <label style="margin-bottom:0">
+    <input type="checkbox" name="loop_enabled" {{ 'checked' if settings.loop_enabled }}>
+    Run the demotion loop automatically on that interval
+  </label>
+</div>
+
+<div class="panel">
+  <h2>Safety</h2>
+  <label>
+    <input type="checkbox" name="dry_run" {{ 'checked' if settings.dry_run }}>
+    <strong>Dry run</strong> &mdash; plan and record actions without touching Radarr
+  </label>
+  <div class="grid">
+    <label><span>New-release window (months)</span>
+      <input type="number" name="new_release_window_months" value="{{ settings.new_release_window_months }}">
+    </label>
+    <label><span>Exclusion tag (never demoted)</span>
+      <input type="text" name="exclusion_tag" value="{{ settings.exclusion_tag }}"></label>
+    <label><span>Tag applied on demotion</span>
+      <input type="text" name="archived_tag" value="{{ settings.archived_tag }}"></label>
+  </div>
+  <p class="dim" style="margin-bottom:0">
+    The new-release window is a <strong>hard exclusion</strong>, not a weight: a
+    recent release is one "you may not have got to yet", and a 90&nbsp;GB remux scores
+    high enough on impact that any survivable penalty would still reach the top of
+    the queue. At 24 months this protects ~133 titles and still leaves ~21.7&nbsp;TB
+    reclaimable.
+  </p>
+</div>
+
+<div class="panel">
+  <h2>Score weights</h2>
+  <div class="grid">
+    <label><span>Impact (bytes reclaimed)</span>
+      <input type="text" name="w_impact" value="{{ settings.w_impact }}"></label>
+    <label><span>Age (film release date)</span>
+      <input type="text" name="w_age" value="{{ settings.w_age }}"></label>
+  </div>
+  <p class="dim" style="margin-bottom:0">
+    Ranking uses these two signals only. Raising <strong>age</strong> promotes canonical
+    classics &mdash; The Godfather and Schindler's List rank above Transformers on that
+    axis alone &mdash; so check the Candidates page after changing weights, and use the
+    exclusion tag ({{ settings.exclusion_tag }}) for anything you'd regret losing.
+  </p>
+</div>
+
+<div class="panel">
+  <h2>Demotion</h2>
+  <div class="grid">
+    <label><span>Source tiers (comma separated)</span>
+      <input type="text" name="source_tiers" value="{{ settings.source_tiers|join(', ') }}"></label>
+    <label><span>Archive target tier</span>
+      <input type="text" name="archive_tier" value="{{ settings.archive_tier }}"></label>
+    <label><span>Archive quality profile name</span>
+      <input type="text" name="archive_profile_name" value="{{ settings.archive_profile_name }}"></label>
+    <label><span>Batch size</span>
+      <input type="number" name="batch_size" value="{{ settings.batch_size }}"></label>
+    <label><span>Throttle between grabs (seconds)</span>
+      <input type="number" name="search_throttle_seconds" value="{{ settings.search_throttle_seconds }}"></label>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Path mapping</h2>
+  <div class="grid">
+    <label><span>Radarr root folder (as Radarr sees it)</span>
+      <input type="text" name="radarr_root" value="{{ settings.radarr_root }}"></label>
+    <label><span>Movies subdir under the mount</span>
+      <input type="text" name="media_movies_subdir" value="{{ settings.media_movies_subdir }}"></label>
+  </div>
+  <p class="dim" style="margin-bottom:0">
+    Translates Radarr's file paths to the read-only mount for free-space and the orphan
+    walk. The mount point itself (<code>/media</code>) is fixed by the container's volume.
+    Check the dashboard's path-mapping banner after changing these.
+  </p>
+</div>
+
+<div class="panel">
+  <h2>Archive-HD track (kids movies)</h2>
+  <label>
+    <input type="checkbox" name="hd_track_enabled" {{ 'checked' if settings.hd_track_enabled }}>
+    Force-grab replacements for cutoff-unmet titles on the Archive-HD profile
+  </label>
+  <div class="grid">
+    <label><span>Archive-HD profile name</span>
+      <input type="text" name="hd_profile_name" value="{{ settings.hd_profile_name }}"></label>
+    <label><span>HD target tier (top of that profile)</span>
+      <input type="text" name="hd_target_tier" value="{{ settings.hd_target_tier }}"></label>
+    <label><span>HD batch size per run</span>
+      <input type="number" name="hd_batch_size" value="{{ settings.hd_batch_size }}"></label>
+  </div>
+  <p class="dim" style="margin-bottom:0">
+    Separate from the free-space loop: <em>you</em> choose titles by assigning them to
+    this profile in Radarr; media-curator just runs the search+grab Radarr won't do
+    automatically after a profile change. Runs on the same interval as the loop.
+  </p>
+</div>
+
+<div class="panel">
+  <h2>Audit</h2>
+  <div class="grid">
+    <label><span>Bloated ratio (&times; cohort median)</span>
+      <input type="text" name="bloated_ratio" value="{{ settings.bloated_ratio }}"></label>
+    <label><span>Underweight ratio (&times; cohort median)</span>
+      <input type="text" name="underweight_ratio" value="{{ settings.underweight_ratio }}"></label>
+    <label><span>Minimum cohort size to judge against</span>
+      <input type="number" name="min_cohort_size" value="{{ settings.min_cohort_size }}"></label>
+    <label><span>Weekly audit day</span>
+      <input type="text" name="audit_cron_day" value="{{ settings.audit_cron_day }}"></label>
+    <label><span>Weekly audit hour</span>
+      <input type="number" name="audit_cron_hour" value="{{ settings.audit_cron_hour }}"></label>
+  </div>
+</div>
+
+<button type="submit">Save settings</button>
+</form>
+{% endblock %}

@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block body %}
+
+<div class="panel">
+  <h2>Profile assignment rules</h2>
+  <p class="dim" style="margin-top:0">
+    Keep Radarr in sync automatically: match movies by <strong>genre</strong>,
+    <strong>collection</strong>, or <strong>tag</strong> and assign them a quality
+    profile. New titles that match land on the right archive profile without a manual
+    bulk edit, and the curator then force-grabs the replacement Radarr won't search
+    for. Titles a rule claims are left out of the free-space loop, so the two never
+    fight. First matching rule wins.
+  </p>
+  {% if error %}<div class="note bad">Radarr unreachable ({{ error }}). Rules still save.</div>{% endif %}
+
+  <form method="post" action="/rules/add" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; align-items:end">
+    <label><span>Match on</span>
+      <select name="match_type" style="background:#0e1016;border:1px solid var(--line);color:var(--fg);padding:7px 9px;border-radius:6px;width:100%">
+        <option value="genre">genre</option>
+        <option value="collection">collection</option>
+        <option value="tag">tag</option>
+      </select></label>
+    <label><span>Value (e.g. Family)</span>
+      <input type="text" name="match_value" list="genrelist" placeholder="Family" required></label>
+    <label><span>Assign profile</span>
+      <select name="profile_name" style="background:#0e1016;border:1px solid var(--line);color:var(--fg);padding:7px 9px;border-radius:6px;width:100%">
+        {% for p in profiles %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+      </select></label>
+    <button type="submit">Add rule</button>
+  </form>
+  <datalist id="genrelist">
+    {% for g, n in genres %}<option value="{{ g }}">{{ g }} ({{ n }})</option>{% endfor %}
+    {% for cname, n in collections %}<option value="{{ cname }}">{{ cname }} ({{ n }})</option>{% endfor %}
+  </datalist>
+</div>
+
+{% if managed %}
+<div class="panel">
+  <h2>Managed profiles &mdash; live from Radarr</h2>
+  <p class="dim" style="margin-top:0">
+    What the curator reads from Radarr right now. Edit a profile in Radarr and it
+    shows up here on the next load &mdash; no need to tell the curator. A red
+    <strong>target</strong> means the profile isn't a valid demotion target.
+  </p>
+  <table>
+    <tr><th>Profile</th><th>Target (top allowed)</th><th>Allowed</th><th class="num">Pending</th></tr>
+    {% for p in managed %}
+    <tr>
+      <td>{{ p.name }}</td>
+      <td class="{{ 'good' if p.valid else 'bad' }}">{{ p.target or '&mdash;'|safe }}
+        {% if not p.valid %}<span class="dim">&mdash; {{ p.reason }}</span>{% endif %}</td>
+      <td class="dim">{{ p.allowed|join(', ') }}</td>
+      <td class="num">{{ p.pending }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2>Active rules ({{ rules|length }})</h2>
+  {% if rules %}
+  <table>
+    <tr><th>Match</th><th>Value</th><th>Assign profile</th><th></th></tr>
+    {% for r in rules %}
+    <tr>
+      <td>{{ r.match_type }}</td>
+      <td><strong>{{ r.match_value }}</strong></td>
+      <td>{{ r.profile_name }}</td>
+      <td style="text-align:right">
+        <form method="post" action="/rules/remove/{{ r.id }}" style="display:inline">
+          <button type="submit" class="ghost">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="dim">Rules apply on the loop interval, or run now:
+    <form method="post" action="/managed/run" style="display:inline">
+      <button type="submit" class="ghost">Apply rules + grab now</button>
+    </form>
+  </p>
+  {% else %}
+  <p class="dim">No rules yet. Example: match <code>genre = Family</code> &rarr; assign
+    <code>Archive-HD</code> to keep all kids movies demoted automatically.</p>
+  {% endif %}
+</div>
+
+{% if genres %}
+<div class="panel">
+  <h2>Genres in your library</h2>
+  <div class="scroll"><table>
+    {% for g, n in genres[:20] %}<tr><td>{{ g }}</td><td class="num dim">{{ n }}</td></tr>{% endfor %}
+  </table></div>
+</div>
+{% endif %}
+
+{% endblock %}

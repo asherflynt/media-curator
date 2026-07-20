@@ -1,0 +1,33 @@
+services:
+  media-curator:
+    build: .
+    container_name: media-curator
+    restart: unless-stopped
+    ports:
+      - "8420:8420"
+    environment:
+      # Connections + path mapping are now set in the UI (Settings -> Connections)
+      # and stored in the database. Everything below is an optional BOOTSTRAP
+      # fallback, used only until you save in the UI -- then it can be removed.
+      MC_RADARR_URL: "${MC_RADARR_URL:-}"
+      MC_RADARR_KEY: "${MC_RADARR_KEY:-}"
+      MC_SONARR_URL: "${MC_SONARR_URL:-}"
+      MC_SONARR_KEY: "${MC_SONARR_KEY:-}"
+
+      # The container mount point free-space + the orphan walk measure. This one
+      # stays here because it's tied to the volume mount below (not UI-editable).
+      MC_MEDIA_PATH: "/media"
+
+      # Bootstrap defaults for the path mapping (now editable in Settings).
+      MC_RADARR_ROOT: "/downloads/Movies"
+      MC_MEDIA_MOVIES_SUBDIR: "Movies"
+
+      MC_DB: "/data/media-curator.db"
+      TZ: "America/New_York"
+    volumes:
+      - ./data:/data
+      # Read-only. This service never writes to the array; Radarr does the
+      # file operations. statvfs + the orphan walk only need to read.
+      # Direct ZFS pool path (/mnt/cluster/Media), NOT the /mnt/user shfs union:
+      # statvfs on the pool dataset reports true pool free space.
+      - /mnt/cluster/Media:/media:ro

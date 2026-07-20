@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block body %}
+
+{% if error %}
+<div class="note bad"><strong>Cannot rank candidates.</strong> {{ error }}</div>
+{% else %}
+
+<div class="panel">
+  <h2>Eligible for demotion</h2>
+  <div class="grid">
+    <div><div class="dim">Eligible titles</div><div class="big">{{ total_eligible }}</div></div>
+    <div><div class="dim">Total reclaimable</div>
+      <div class="big">{{ '{:,.0f}'.format(total_reclaim_gb) }}<span class="dim" style="font-size:14px"> GB</span></div></div>
+    <div><div class="dim">Expected size after</div>
+      <div class="big">{{ '%.1f'|format(target_gb) }}<span class="dim" style="font-size:14px"> GB</span></div></div>
+  </div>
+  <p class="dim" style="margin-bottom:0">
+    Expected size is the measured median of your own {{ settings.archive_tier }} files,
+    not an assumed constant. Ranking is by reclaimable bytes and film age only.
+  </p>
+</div>
+
+{% if rejected %}
+<div class="panel">
+  <h2>Excluded by hard filters</h2>
+  <table>
+    <tr><td>Inside new-release window</td><td class="num">{{ rejected.inside_new_release_window }}</td>
+      <td class="dim">protected &mdash; recent, you may not have got to it yet</td></tr>
+    <tr><td>On the blocklist</td><td class="num">{{ rejected.blocklisted }}</td>
+      <td class="dim">never demote &mdash; <a href="/blocklist" style="color:var(--accent)">manage</a></td></tr>
+    <tr><td>Carries the exclusion tag</td><td class="num">{{ rejected.excluded_tag }}</td>
+      <td class="dim">{{ settings.exclusion_tag }}</td></tr>
+    <tr><td>Not a source tier</td><td class="num">{{ rejected.wrong_tier }}</td>
+      <td class="dim">{{ settings.source_tiers|join(', ') }}</td></tr>
+    <tr><td>No gain from demoting</td><td class="num">{{ rejected.no_gain }}</td>
+      <td class="dim">already at or below target size</td></tr>
+    <tr><td>No file</td><td class="num">{{ rejected.no_file }}</td><td></td></tr>
+  </table>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h2>Ranked &mdash; top {{ candidates|length }} of {{ total_eligible }}</h2>
+  <p class="dim" style="margin-top:0">
+    Nothing here has been acted on. Review before turning dry-run off &mdash; this is
+    where the age-vs-classics tension shows up.
+  </p>
+  <div class="scroll"><table>
+    <tr>
+      <th class="num">#</th><th>Title</th><th class="num">Size</th>
+      <th class="num">Reclaim</th><th class="num">Released</th>
+      <th class="num">Score</th><th>Breakdown</th><th></th>
+    </tr>
+    {% for c in candidates %}
+    <tr>
+      <td class="num dim">{{ loop.index }}</td>
+      <td>{{ c.title }}
+        {% if c.release_basis != 'home' %}<span class="pill" title="no digital/physical release date">{{ c.release_basis }}</span>{% endif %}
+      </td>
+      <td class="num">{{ '%.1f'|format(c.size/1024**3) }} GB</td>
+      <td class="num good">{{ '%.1f'|format(c.reclaim/1024**3) }} GB</td>
+      <td class="num dim">{{ c.movie.year }}</td>
+      <td class="num"><strong>{{ '%.3f'|format(c.score) }}</strong></td>
+      <td style="min-width:160px">
+        <div class="bar" title="impact {{ '%.2f'|format(c.components.impact) }}">
+          <i style="width:{{ (c.components.impact*100)|round }}%"></i></div>
+      </td>
+      <td style="text-align:right">
+        <form method="post" action="/blocklist/add" style="display:inline">
+          <input type="hidden" name="movie_id" value="{{ c.id }}">
+          <input type="hidden" name="tmdb_id" value="{{ c.tmdb }}">
+          <input type="hidden" name="title" value="{{ c.title }}">
+          <input type="hidden" name="year" value="{{ c.movie.year }}">
+          <input type="hidden" name="reason" value="never demote">
+          <input type="hidden" name="back" value="/candidates">
+          <button type="submit" class="ghost" title="Never demote this title">Block</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table></div>
+</div>
+{% endif %}
+{% endblock %}
