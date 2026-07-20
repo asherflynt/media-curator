@@ -12,6 +12,20 @@
 </div>
 {% endif %}
 
+{% if stuck_imports %}
+<div class="note">
+  <strong>{{ stuck_imports }} download{{ 's' if stuck_imports != 1 }} blocked on the
+  downgrade rejection.</strong>
+  Radarr grabbed the replacement but refuses to import it over a higher-ranked
+  existing file &mdash; the profile change doesn't clear that check. Until they
+  import, both copies occupy space and nothing is reclaimed.
+  <form method="post" action="/import/run" style="margin-top:10px"
+        onsubmit="return confirm('Send the existing files to the Recycle Bin and force-import the replacements?')">
+    <button>Force import now</button>
+  </form>
+</div>
+{% endif %}
+
 {% if mapping and not mapping.ok %}
 <div class="note bad">
   <strong>Path mapping unverified.</strong> {{ mapping.reason }}<br>

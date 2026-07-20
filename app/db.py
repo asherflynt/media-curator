@@ -48,6 +48,20 @@ DEFAULTS: dict[str, Any] = {
     "batch_size": 5,
     "search_throttle_seconds": 20,
 
+    # How many tiers BELOW a profile's top quality a demotion may fall when the
+    # top tier has no release. 0 = top-tier-or-nothing (the old behaviour, which
+    # stalled titles forever); 3 walks Bluray-1080p -> WEBDL-1080p -> WEBRip... .
+    # The ladder is the profile's own allowed list and never reaches the file's
+    # current tier, so it can only ever pick something smaller.
+    "tier_fallback_depth": 3,
+
+    # Radarr refuses to IMPORT a downgrade even after the profile changes, and
+    # parks the finished download waiting for a manual import. When on, the
+    # curator clears those itself: old file -> Recycle Bin, then ManualImport.
+    "auto_import_downgrades": True,
+    "import_throttle_seconds": 2,
+    "import_interval_minutes": 15,
+
     # Second demotion track. Unlike the free-space loop this isn't space-driven:
     # the user picks titles by assigning them to hd_profile_name in Radarr (e.g.
     # kids movies -> Archive-HD), and media-curator force-grabs the target that

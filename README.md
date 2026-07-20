@@ -24,6 +24,8 @@ Crucially, demotion goes through **Radarr's native path**: switch the title to a
 - **Reads real free space** via `statvfs` on the mount — never Radarr's misleading per‑share figure.
 - **Quality audit** — flags *underweight* (Radarr thinks it's a Bluray, the file is tiny), *bloated*, *suspected upscales*, *orphans* (folders Radarr doesn't track), *broken*, and *duplicate* files, judged against per‑cohort medians derived from your own library.
 - **Rule‑based profile assignment** — match by **genre / collection / tag** → assign a quality profile (e.g. `genre = Family → Archive‑HD`). New matching titles are kept in sync automatically, and the curator force‑grabs the replacement Radarr won't auto‑search for.
+- **Tier fallback** — when the profile's top quality has no release, it walks *down* that profile's own allowed list (Bluray‑1080p → WEBDL‑1080p → WEBRip‑1080p) instead of skipping the title forever. Never picks a tier at or above the file it's replacing.
+- **Clears blocked imports** — Radarr refuses to *import* a downgrade even after the profile changes, and parks the finished download waiting for a manual import. The curator does that itself: old file → Recycle Bin, then `ManualImport`.
 - **Protection that's honored on every track** — a hard new‑release window, an in‑app blocklist, and a Radarr keep‑tag. A classic that's also a kids movie stays protected.
 - **Safe by default** — starts in **dry‑run**; every action is written to a reversible manifest.
 
@@ -72,6 +74,7 @@ Then open `http://<host>:8420`.
 - **Ranking** is reclaimable bytes + film age. No watch‑history dependency.
 - **The loop never over‑demotes**: it counts in‑flight downloads (and the Recycle Bin) toward projected free space and stops at the target, so it can't drain the library chasing a number that hasn't moved yet.
 - **Two tracks that never fight**: the space loop handles size‑driven demotions; rule‑managed titles (and anything on a managed archive profile) are handed off to the assignment/grab track instead.
+- **A grab and an import are two different fights.** Profile *ordering* decides what Radarr searches for and grabs. The import guard is a separate, blunter rule that compares the two files by quality‑definition *weight* — a global ranking where `Remux-2160p` simply outweighs `Bluray-1080p`, which no profile ordering changes. That's why a demotion downloads fine and then dies on the doorstep with *"Not an upgrade for existing movie file"*. The import sweep resolves it by deleting the existing file first (to the Recycle Bin, so it stays recoverable — and this is what actually frees the bytes), which removes the thing being compared against, then issuing `ManualImport`, which bypasses the upgrade check by design. Only downloads blocked on that exact rejection, for movies on a curator‑managed profile, are ever touched.
 
 ## Development
 
@@ -79,6 +82,9 @@ Then open `http://<host>:8420`.
 pip install -r requirements.txt
 # exercise the engine against a live Radarr (read-only):
 MC_RADARR_URL=... MC_RADARR_KEY=... MC_SONARR_URL=... MC_SONARR_KEY=... python verify.py
+
+# tier ladder + blocked-import logic, against fakes (no Radarr needed):
+python verify_offline.py
 ```
 
 Images are built and pushed to GHCR by GitHub Actions on every push to `main` and on `v*` tags.

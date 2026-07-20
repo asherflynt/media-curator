@@ -215,35 +215,68 @@ def _rejection_is_soft(reason: str) -> bool:
     return any(m in r for m in _SOFT_REJECTION_MARKERS)
 
 
-def _pick_release(radarr: Radarr, movie_id: int, archive_tier: str) -> dict | None:
+def _tier_ladder(profile: dict, current_tier: str | None, depth: int) -> list[str]:
+    """The tiers a demotion may target, best first.
+
+    The top allowed quality is the goal, but insisting on it was the reason a
+    title with no Bluray-1080p release simply stalled forever -- re-skipped on
+    every pass, never demoted, never freeing a byte. So we walk DOWN the
+    profile's own allowed list: every tier in it is one the user authored as
+    acceptable for this archive profile, so a lower one is a worse outcome than
+    the top tier but a far better one than keeping the 40 GB remux.
+
+    Two guards. The ladder stops above the file's current tier, so a "demotion"
+    can never grab something equal or better (a no-op that costs a download).
+    And `depth` caps how far it falls -- depth 0 restores the old
+    top-tier-or-nothing behaviour, so this is opt-out.
+    """
+    ladder = [t for t in reversed(_profile_allowed(profile)) if t]
+    if current_tier:
+        lowered = [t.lower() for t in ladder]
+        if current_tier.lower() in lowered:
+            ladder = ladder[lowered.index(current_tier.lower()) + 1:]
+    return ladder[:max(1, int(depth) + 1)]
+
+
+def _pick_release(radarr: Radarr, movie_id: int, tiers: list[str],
+                  max_bytes: int | None = None) -> tuple[dict | None, str | None]:
     """Confirm a suitable release exists before touching anything.
 
-    A release qualifies when it is the archive tier and its *only* rejections
-    are profile-relative ones (the existing remux meeting cutoff), which is how
-    every candidate looks while still on its original profile -- that was the
-    "no WEBDL-2160p release available" bug. Releases with a real rejection
-    (wrong language, ignored terms, wrong size) are still skipped.
+    A release qualifies when its quality is one of `tiers` and its *only*
+    rejections are profile-relative ones (the existing remux meeting cutoff),
+    which is how every candidate looks while still on its original profile --
+    that was the "no WEBDL-2160p release available" bug. Releases with a real
+    rejection (wrong language, ignored terms, wrong size) are still skipped.
 
-    No qualifying release -> skip the title entirely. Nothing is touched.
+    `tiers` is ordered best-first and tried in order, so a lower tier is only
+    reached when nothing better exists. Returns (release, tier_it_matched), or
+    (None, None) when the whole ladder comes up empty -- then the title is
+    skipped and nothing is touched.
     """
     try:
-        releases = radarr.releases(movie_id)
+        releases = radarr.releases(movie_id)  # one indexer search for all tiers
     except Exception:  # noqa: BLE001
-        return None
-    matches = []
-    for r in releases:
-        name = ((r.get("quality") or {}).get("quality") or {}).get("name", "")
-        if name.lower() != archive_tier.lower():
-            continue
-        rejections = r.get("rejections") or []
-        if all(_rejection_is_soft(x) for x in rejections):
-            matches.append(r)
-    if not matches:
-        return None
-    # Prefer Radarr's own scoring, then availability.
-    matches.sort(key=lambda r: (-(r.get("customFormatScore") or 0),
-                                -(r.get("seeders") or 0)))
-    return matches[0]
+        return None, None
+
+    for tier in tiers:
+        matches = []
+        for r in releases:
+            name = ((r.get("quality") or {}).get("quality") or {}).get("name", "")
+            if name.lower() != tier.lower():
+                continue
+            if all(_rejection_is_soft(x) for x in (r.get("rejections") or [])):
+                # A replacement no smaller than what's on disk reclaims nothing;
+                # dropping a tier is meant to save space, not just churn it.
+                size = int(r.get("size") or 0)
+                if max_bytes and size and size >= max_bytes:
+                    continue
+                matches.append(r)
+        if matches:
+            # Prefer Radarr's own scoring, then availability.
+            matches.sort(key=lambda r: (-(r.get("customFormatScore") or 0),
+                                        -(r.get("seeders") or 0)))
+            return matches[0], tier
+    return None, None
 
 
 def run_once(force: bool = False) -> dict:
@@ -275,22 +308,26 @@ def run_once(force: bool = False) -> dict:
     deficit = int(st["deficit_gb"] * GB)
     chosen = score.select_for_deficit(ranked, deficit, int(settings["batch_size"]))
 
+    depth = int(settings.get("tier_fallback_depth", 0))
     acted = []
     for c in chosen:
-        rel = _pick_release(radarr, c.id, settings["archive_tier"])
+        ladder = _tier_ladder(profile, c.tier, depth)
+        rel, tier = _pick_release(radarr, c.id, ladder, max_bytes=c.size)
         if not rel:
             db.record_action(movie_id=c.id, title=c.title, action="skip",
                              old_tier=c.tier, old_size=c.size, dry_run=dry,
                              status="skipped",
-                             detail=f"no {settings['archive_tier']} release available")
+                             detail=f"no release available in {'/'.join(ladder)}")
             continue
 
+        fallback = "" if tier == ladder[0] else f" (fell back from {ladder[0]})"
         aid = db.record_action(
             movie_id=c.id, title=c.title, action="demote", old_tier=c.tier,
             old_size=c.size, old_profile_id=c.movie.get("qualityProfileId"),
             new_profile_id=profile["id"], release_guid=rel.get("guid"),
             dry_run=dry, status="pending",
-            detail=f"score={c.score:.3f} reclaim={c.reclaim / GB:.1f}GB",
+            detail=f"-> {tier}{fallback} score={c.score:.3f} "
+                   f"reclaim={c.reclaim / GB:.1f}GB",
         )
 
         if dry:
@@ -406,7 +443,7 @@ def _protected_ids(radarr: Radarr, settings: dict, movies: list[dict]) -> set[in
 
 def _grab_profile(radarr: Radarr, profile: dict, movies: list[dict],
                   queued: set[int], protected: set[int],
-                  dry: bool, batch: int, throttle: float) -> dict:
+                  dry: bool, batch: int, throttle: float, depth: int = 0) -> dict:
     """Force-grab the target tier for cutoff-unmet titles on one profile. No
     profile switch -- rules/user already assigned them; this is only the
     search+grab Radarr won't do automatically."""
@@ -418,19 +455,22 @@ def _grab_profile(radarr: Radarr, profile: dict, movies: list[dict],
         mf = m.get("movieFile") or {}
         old_tier = ((mf.get("quality") or {}).get("quality") or {}).get("name")
         old_size = int(mf.get("size") or 0)
-        rel = _pick_release(radarr, m["id"], target)
+        ladder = _tier_ladder(profile, old_tier, depth)
+        rel, tier = _pick_release(radarr, m["id"], ladder, max_bytes=old_size)
         if not rel:
             db.record_action(movie_id=m["id"], title=m.get("title"), action="skip",
                              old_tier=old_tier, old_size=old_size, dry_run=dry,
                              status="skipped",
-                             detail=f"{profile['name']}: no {target} release available")
+                             detail=f"{profile['name']}: no release available "
+                                    f"in {'/'.join(ladder)}")
             continue
+        fallback = "" if tier == ladder[0] else f" (fell back from {ladder[0]})"
         aid = db.record_action(movie_id=m["id"], title=m.get("title"),
                                action="demote", old_tier=old_tier, old_size=old_size,
                                new_profile_id=profile["id"],
                                release_guid=rel.get("guid"), dry_run=dry,
                                status="pending",
-                               detail=f"{profile['name']} -> {target}")
+                               detail=f"{profile['name']} -> {tier}{fallback}")
         if dry:
             db.update_action(aid, "dry-run")
             acted.append(m.get("title"))
@@ -467,9 +507,11 @@ def run_managed(force: bool = False) -> dict:
     batch = int(settings.get("hd_batch_size", settings.get("batch_size", 5)))
     throttle = float(settings["search_throttle_seconds"])
 
+    depth = int(settings.get("tier_fallback_depth", 0))
     results, grabbed, remaining = [], 0, 0
     for prof in managed_grab_profiles(radarr, settings):
-        r = _grab_profile(radarr, prof, movies, queued, protected, dry, batch, throttle)
+        r = _grab_profile(radarr, prof, movies, queued, protected, dry, batch,
+                          throttle, depth)
         results.append(r)
         grabbed += len(r["grabbed"])
         remaining += r["remaining"]

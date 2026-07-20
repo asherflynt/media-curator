@@ -47,6 +47,9 @@ class ArrClient:
     def put(self, path: str, **kw: Any) -> Any:
         return self._req("PUT", path, **kw)
 
+    def delete(self, path: str, **kw: Any) -> Any:
+        return self._req("DELETE", path, **kw)
+
     # Small/fast endpoints get a short timeout so a page render degrades in
     # seconds when the host is down rather than blocking on the 120s default.
     # (Observed for real: the box answered ICMP while every service was dead,
@@ -89,6 +92,27 @@ class Radarr(ArrClient):
         """Force-grab a specific release. Radarr downloads, verifies, imports,
         and only then replaces the existing file (old one -> Recycle Bin)."""
         return self.post("release", json={"guid": guid, "indexerId": indexer_id})
+
+    def queue(self, page_size: int = 1000) -> list[dict]:
+        q = self.get("queue", params={"pageSize": page_size,
+                                      "includeMovie": "true"}) or {}
+        return q.get("records", [])
+
+    def delete_movie_file(self, movie_file_id: int) -> Any:
+        """Delete the current file for a movie. Honours Radarr's Recycle Bin
+        setting, so this is reversible for the retention window -- that is the
+        whole basis of the manifest's 'a demotion can be reversed' claim."""
+        return self.delete(f"moviefile/{int(movie_file_id)}")
+
+    def manual_import_candidates(self, download_id: str) -> list[dict]:
+        """What Radarr's manual-import dialog would show for a finished
+        download, including its own rejections (which we deliberately ignore --
+        see importer.py)."""
+        return self.get("manualimport", params={
+            "downloadId": download_id, "filterExistingFiles": "false"}) or []
+
+    def command(self, name: str, **body: Any) -> Any:
+        return self.post("command", json={"name": name, **body})
 
     def root_folders(self) -> list[dict]:
         return self.get("rootfolder") or []

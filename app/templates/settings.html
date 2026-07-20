@@ -72,6 +72,41 @@
       <input type="number" name="batch_size" value="{{ settings.batch_size }}"></label>
     <label><span>Throttle between grabs (seconds)</span>
       <input type="number" name="search_throttle_seconds" value="{{ settings.search_throttle_seconds }}"></label>
+    <label><span>Tier fallback depth</span>
+      <input type="number" name="tier_fallback_depth" min="0" value="{{ settings.tier_fallback_depth }}"></label>
+  </div>
+  <p class="dim" style="margin:10px 0 0">
+    <strong>Tier fallback depth</strong> is how many tiers below the profile's top
+    quality a demotion may settle for when the top tier has no release. At 0 a
+    title with no Bluray-1080p available is skipped on every pass forever &mdash;
+    it never demotes and never frees anything. The ladder is the profile's own
+    allowed list, walked downward, and it stops above the file's current tier, so
+    a fallback is always still a demotion.
+  </p>
+</div>
+
+<div class="panel">
+  <h2>Blocked imports</h2>
+  <label>
+    <input type="checkbox" name="auto_import_downgrades" {{ 'checked' if settings.auto_import_downgrades }}>
+    Force-import downgrades Radarr refuses
+  </label>
+  <p class="dim" style="margin:10px 0">
+    Radarr checks for an upgrade again at <em>import</em> time, comparing quality
+    weights rather than your profile order, so a completed Bluray-1080p download
+    is rejected over an existing Remux-2160p no matter which profile the movie is
+    on. The download then parks in the queue waiting for someone to click through
+    the manual-import dialog. With this on, the curator does that itself: the
+    existing file goes to Radarr's Recycle Bin (still recoverable, and this is
+    what actually frees the space), then the replacement is manually imported,
+    which bypasses the upgrade check by design. Only downloads blocked on that
+    specific rejection, for movies on a curator-managed profile, are touched.
+  </p>
+  <div class="grid">
+    <label><span>Check interval (minutes)</span>
+      <input type="number" name="import_interval_minutes" value="{{ settings.import_interval_minutes }}"></label>
+    <label><span>Throttle between imports (seconds)</span>
+      <input type="number" name="import_throttle_seconds" value="{{ settings.import_throttle_seconds }}"></label>
   </div>
 </div>
 

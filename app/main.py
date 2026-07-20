@@ -12,7 +12,7 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import audit, db, loop, space
+from . import audit, db, importer, loop, space
 from .arr import radarr_from_env
 
 GB = 1024 ** 3
@@ -49,6 +49,14 @@ def _schedule() -> None:
             _safe_managed, IntervalTrigger(minutes=int(s["loop_interval_minutes"])),
             id="managed", replace_existing=True,
         )
+    if s.get("auto_import_downgrades"):
+        # Runs more often than the demotion loop: a grab is worthless until it
+        # imports, and every hour a download sits blocked is an hour the space
+        # it was meant to reclaim stays occupied by BOTH copies.
+        scheduler.add_job(
+            _safe_import, IntervalTrigger(minutes=int(s["import_interval_minutes"])),
+            id="import", replace_existing=True,
+        )
 
 
 def _safe_audit() -> None:
@@ -72,6 +80,13 @@ def _safe_managed() -> None:
         db.log_run("managed", False, str(e)[:500])
 
 
+def _safe_import() -> None:
+    try:
+        importer.run_import_sweep()
+    except Exception as e:  # noqa: BLE001
+        db.log_run("import", False, str(e)[:500])
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init()
@@ -86,7 +101,8 @@ app = FastAPI(title="media-curator", lifespan=lifespan)
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
-    ctx: dict = {"request": request, "page": "dashboard", "errors": []}
+    ctx: dict = {"request": request, "page": "dashboard", "errors": [],
+                 "stuck_imports": 0}
     try:
         ctx["status"] = loop.status()
     except Exception as e:  # noqa: BLE001
@@ -117,6 +133,7 @@ def dashboard(request: Request):
             ctx["managed_bad"] = loop.managed_health(r)
         except Exception:  # noqa: BLE001
             ctx["managed_bad"] = []
+        ctx["stuck_imports"] = importer.pending_count(r)
     except Exception as e:  # noqa: BLE001
         ctx["errors"].append(
             f"Radarr unreachable ({e}). The page still renders; free space above "
@@ -329,6 +346,14 @@ def managed_run():
         return JSONResponse(loop.run_managed(force=True), status_code=200)
     except loop.LoopAbort as e:
         return JSONResponse({"error": str(e), "aborted": True}, status_code=409)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/import/run")
+def import_run():
+    try:
+        return JSONResponse(importer.run_import_sweep(force=True), status_code=200)
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"error": str(e)}, status_code=500)
 

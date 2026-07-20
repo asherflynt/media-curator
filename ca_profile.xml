@@ -1,0 +1,14 @@
+<CommunityApplications>
+  <!-- Required profile -->
+  <Profile>
+media-curator reclaims disk space in a Radarr/Sonarr library by demoting over-quality files (e.g. 4K remuxes to 4K WEB-DL) using Radarr's own download-verify-replace path — it never re-encodes. Free space is read from the filesystem (statvfs), not Radarr's per-share numbers, so it works correctly on unRAID/ZFS pools.
+
+This repository contains the single **media-curator** Docker template. Everything is configured from the WebUI — Radarr/Sonarr connections, free-space targets, and profile assignment rules — with no environment variables or config files required. The app starts in dry-run mode by default.
+
+For support, bug reports, or feature requests, please open an issue on the [GitHub repository](https://github.com/asherflynt/media-curator/issues).
+  </Profile>
+  <!-- Optional icon -->
+  <Icon>https://raw.githubusercontent.com/asherflynt/media-curator/main/icon.png</Icon>
+  <!-- Optional web page -->
+  <WebPage>https://github.com/asherflynt/media-curator</WebPage>
+</CommunityApplications>
