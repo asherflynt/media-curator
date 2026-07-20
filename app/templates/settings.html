@@ -108,6 +108,17 @@
     <label><span>Throttle between imports (seconds)</span>
       <input type="number" name="import_throttle_seconds" value="{{ settings.import_throttle_seconds }}"></label>
   </div>
+  <label style="margin-top:12px">
+    <input type="checkbox" name="allow_permanent_delete" {{ 'checked' if settings.allow_permanent_delete }}>
+    Allow permanent delete (no Recycle Bin required)
+  </label>
+  <p class="dim" style="margin:8px 0 0">
+    Off by default, the sweep refuses to run unless Radarr has a Recycle Bin, so
+    a demotion stays recoverable. Turn this <strong>on</strong> to free space the
+    instant the old file is removed rather than after Recycle Bin retention
+    expires &mdash; the tradeoff is that demotions become <strong>irreversible</strong>:
+    the recovery plan is re-downloading the title.
+  </p>
 </div>
 
 <div class="panel">

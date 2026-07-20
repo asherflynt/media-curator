@@ -202,7 +202,7 @@ def run_import_sweep(force: bool = False) -> dict:
     # *reversible* act if Radarr has a Recycle Bin configured -- without one the
     # DELETE is permanent, and this sweep would quietly shred remuxes at machine
     # speed the first time it ran. Refuse rather than find that out afterwards.
-    if not dry:
+    if not dry and not settings.get("allow_permanent_delete"):
         try:
             bin_path = (radarr.media_management() or {}).get("recycleBin")
         except Exception as e:  # noqa: BLE001
@@ -211,8 +211,10 @@ def run_import_sweep(force: bool = False) -> dict:
         if not bin_path:
             msg = ("refusing to force-import: Radarr has no Recycle Bin "
                    "configured, so deleting the existing file would be "
-                   "permanent. Set it in Radarr -> Settings -> Media "
-                   "Management -> File Management -> Recycle Bin.")
+                   "permanent. Either set it in Radarr -> Settings -> Media "
+                   "Management -> File Management -> Recycle Bin, or turn on "
+                   "'Allow permanent delete' in media-curator Settings to "
+                   "accept irreversible demotions.")
             db.log_run("import", False, msg)
             return {"acted": False, "error": msg}
 

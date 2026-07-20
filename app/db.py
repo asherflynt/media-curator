@@ -62,6 +62,13 @@ DEFAULTS: dict[str, Any] = {
     "import_throttle_seconds": 2,
     "import_interval_minutes": 15,
 
+    # Normally the sweep refuses to delete when Radarr has no Recycle Bin, since
+    # the delete would be permanent. Turning this ON accepts that: space is freed
+    # the instant the old file is removed instead of after retention expires,
+    # and the recovery plan becomes "re-download it". Demotions stop being
+    # reversible -- the manifest records old tier and size, but not the bytes.
+    "allow_permanent_delete": False,
+
     # Second demotion track. Unlike the free-space loop this isn't space-driven:
     # the user picks titles by assigning them to hd_profile_name in Radarr (e.g.
     # kids movies -> Archive-HD), and media-curator force-grabs the target that
