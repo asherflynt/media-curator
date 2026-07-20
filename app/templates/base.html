@@ -52,6 +52,10 @@
   .pill.dry { background:#3a2f16; color:var(--warn); }
   .pill.live { background:#3a1a1a; color:var(--bad); }
   code { background:#0e1016; padding:1px 5px; border-radius:4px; font-size:12px; }
+  .run-result { margin-top:12px; }
+  button[disabled] { opacity:.6; cursor:progress; }
+  @keyframes rr-pulse { 0%,100%{opacity:.4} 50%{opacity:1} }
+  .run-result.running .panel h2 { animation:rr-pulse 1s ease-in-out infinite; }
 </style>
 </head>
 <body>
@@ -73,5 +77,112 @@
   </span>
 </header>
 <main>{% block body %}{% endblock %}</main>
+<script>
+(function () {
+  function esc(s) {
+    return String(s).replace(/[&<>]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c];
+    });
+  }
+  function num(v) {
+    return (typeof v === 'number') ? (Math.round(v * 10) / 10).toLocaleString() : esc(v);
+  }
+  function stat(label, value) {
+    return '<div><div class="dim">' + esc(label) + '</div>' +
+           '<div class="big">' + value + '</div></div>';
+  }
+
+  // Turn a run-endpoint JSON response into a friendly result card.
+  function render(box, data, httpOk) {
+    var isError = !httpOk || data.error || data.aborted;
+    var acted = data.acted;
+    var cls = isError ? 'bad' : (acted === false ? 'dim' : 'good');
+    var heading = isError ? (data.aborted ? 'Loop aborted' : 'Something went wrong')
+                          : (acted === false ? 'Nothing to do' : 'Done');
+    var message = data.summary || data.reason || data.error || '';
+
+    var html = '<div class="panel">';
+    html += '<h2 class="' + cls + '">' + esc(heading) + '</h2>';
+    if (message) html += '<p style="margin:0 0 4px">' + esc(message) + '</p>';
+
+    // Headline numbers, whichever of these the response carries.
+    var cells = [];
+    var st = data.status || {};
+    if (typeof st.free_gb === 'number') cells.push(stat('Free now', num(st.free_gb) + ' GB'));
+    if (typeof st.deficit_gb === 'number') cells.push(stat('Deficit', num(st.deficit_gb) + ' GB'));
+    if (Array.isArray(data.chosen)) cells.push(stat('Demotions', data.chosen.length));
+    if (typeof data.eligible === 'number') cells.push(stat('Eligible', data.eligible));
+    if (typeof data.assigned === 'object' && data.assigned)
+      cells.push(stat('Assigned', num(data.assigned.assigned)));
+    if (typeof data.grabbed === 'number') cells.push(stat('Grabbed', data.grabbed));
+    if (typeof data.remaining === 'number') cells.push(stat('Pending', data.remaining));
+    if (typeof data.stuck === 'number') cells.push(stat('Stuck', data.stuck));
+    if (typeof data.imported === 'number') cells.push(stat('Imported', data.imported));
+    if (cells.length) html += '<div class="grid" style="margin-top:12px">' + cells.join('') + '</div>';
+
+    // What was acted on.
+    if (Array.isArray(data.chosen) && data.chosen.length) {
+      html += '<div class="scroll" style="margin-top:14px"><table>' +
+        '<tr><th>Title</th><th class="num">Reclaim</th><th class="num">Score</th></tr>';
+      data.chosen.forEach(function (c) {
+        html += '<tr><td>' + esc(c.title) + (c.dry_run ? ' <span class="pill dry">dry</span>' : '') +
+          '</td><td class="num">' + num(c.reclaim_gb) + ' GB</td>' +
+          '<td class="num">' + num(c.score) + '</td></tr>';
+      });
+      html += '</table></div>';
+    }
+
+    // Why candidates were skipped -- only the reasons that fired.
+    if (data.rejected && typeof data.rejected === 'object') {
+      var reasons = Object.keys(data.rejected).filter(function (k) { return data.rejected[k]; });
+      if (reasons.length) {
+        html += '<p class="dim" style="margin:12px 0 0">Skipped: ' +
+          reasons.map(function (k) {
+            return esc(k.replace(/_/g, ' ')) + ' ' + data.rejected[k];
+          }).join(' &middot; ') + '</p>';
+      }
+    }
+
+    html += '<p style="margin:14px 0 0"><a href="" style="color:var(--accent)">Reload page</a> ' +
+            '<span class="dim">to refresh the figures above.</span></p>';
+    html += '</div>';
+    box.className = 'run-result';
+    box.innerHTML = html;
+  }
+
+  document.querySelectorAll('form[data-run]').forEach(function (form) {
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var msg = form.getAttribute('data-confirm');
+      if (msg && !window.confirm(msg)) return;
+
+      var btn = form.querySelector('button, input[type=submit]');
+      var label = btn ? btn.textContent : '';
+      if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+
+      var box = form.nextElementSibling;
+      if (!box || !box.classList.contains('run-result')) {
+        box = document.createElement('div');
+        form.parentNode.insertBefore(box, form.nextSibling);
+      }
+      box.className = 'run-result running';
+      box.innerHTML = '<div class="panel"><h2>Running…</h2>' +
+        '<p class="dim" style="margin:0">Working through the candidates &mdash; this can take a moment.</p></div>';
+
+      fetch(form.action, { method: 'POST', headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+        .then(function (res) { render(box, res.data, res.ok); })
+        .catch(function (e) {
+          box.className = 'run-result';
+          box.innerHTML = '<div class="panel"><h2 class="bad">Request failed</h2>' +
+            '<p style="margin:0">' + esc(e && e.message ? e.message : e) + '</p></div>';
+        })
+        .then(function () {
+          if (btn) { btn.disabled = false; btn.textContent = label; }
+        });
+    });
+  });
+})();
+</script>
 </body>
 </html>

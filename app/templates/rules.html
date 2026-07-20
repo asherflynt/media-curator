@@ -76,7 +76,8 @@
     {% endfor %}
   </table>
   <p class="dim">Rules apply on the loop interval, or run now:
-    <form method="post" action="/managed/run" style="display:inline">
+    <form method="post" action="/managed/run" data-run
+          data-confirm="Apply rules and grab replacements now?" style="display:inline">
       <button type="submit" class="ghost">Apply rules + grab now</button>
     </form>
   </p>
