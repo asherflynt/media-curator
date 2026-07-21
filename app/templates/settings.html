@@ -97,10 +97,16 @@
     is rejected over an existing Remux-2160p no matter which profile the movie is
     on. The download then parks in the queue waiting for someone to click through
     the manual-import dialog. With this on, the curator does that itself: the
-    existing file goes to Radarr's Recycle Bin (still recoverable, and this is
-    what actually frees the space), then the replacement is manually imported,
-    which bypasses the upgrade check by design. Only downloads blocked on that
-    specific rejection, for movies on a curator-managed profile, are touched.
+    existing file is deleted (this is what actually frees the space), then the
+    replacement is manually imported, which bypasses the upgrade check by
+    design. Only downloads blocked on that specific rejection, for movies on a
+    curator-managed profile, are touched.
+  </p>
+  <p class="dim" style="margin:10px 0">
+    If Radarr has a Recycle Bin configured the deleted file lands there and the
+    demotion stays reversible for the retention window. If it doesn't, the
+    delete is permanent and the space is free immediately &mdash; the sweep runs
+    either way, and says which happened in its summary.
   </p>
   <div class="grid">
     <label><span>Check interval (minutes)</span>
@@ -109,15 +115,18 @@
       <input type="number" name="import_throttle_seconds" value="{{ settings.import_throttle_seconds }}"></label>
   </div>
   <label style="margin-top:12px">
-    <input type="checkbox" name="allow_permanent_delete" {{ 'checked' if settings.allow_permanent_delete }}>
-    Allow permanent delete (no Recycle Bin required)
+    <input type="checkbox" name="auto_import_upgrade_only" {{ 'checked' if settings.auto_import_upgrade_only }}>
+    Auto-force only when &ldquo;not an upgrade&rdquo; is the sole reason
   </label>
   <p class="dim" style="margin:8px 0 0">
-    Off by default, the sweep refuses to run unless Radarr has a Recycle Bin, so
-    a demotion stays recoverable. Turn this <strong>on</strong> to free space the
-    instant the old file is removed rather than after Recycle Bin retention
-    expires &mdash; the tradeoff is that demotions become <strong>irreversible</strong>:
-    the recovery plan is re-downloading the title.
+    On by default. The scheduled sweep clears a download only when every reason
+    Radarr gives for blocking it is the downgrade rejection &mdash; the case
+    where removing the existing file is certain to be the whole fix. Turn it
+    <strong>off</strong> to also clear downloads carrying other complaints
+    (unmatched title, sample, failed check) alongside the rejection; those can
+    stay blocked after the delete, having destroyed the existing file for
+    nothing. The <em>Force blocked imports</em> button on the dashboard is a
+    deliberate human act and clears everything regardless of this setting.
   </p>
 </div>
 

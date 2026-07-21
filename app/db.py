@@ -57,17 +57,18 @@ DEFAULTS: dict[str, Any] = {
 
     # Radarr refuses to IMPORT a downgrade even after the profile changes, and
     # parks the finished download waiting for a manual import. When on, the
-    # curator clears those itself: old file -> Recycle Bin, then ManualImport.
+    # curator clears those itself: delete the old file, then ManualImport. A
+    # Radarr Recycle Bin keeps that reversible but is not required.
     "auto_import_downgrades": True,
     "import_throttle_seconds": 2,
     "import_interval_minutes": 15,
 
-    # Normally the sweep refuses to delete when Radarr has no Recycle Bin, since
-    # the delete would be permanent. Turning this ON accepts that: space is freed
-    # the instant the old file is removed instead of after retention expires,
-    # and the recovery plan becomes "re-download it". Demotions stop being
-    # reversible -- the manifest records old tier and size, but not the bytes.
-    "allow_permanent_delete": False,
+    # Restrict the scheduled sweep to downloads whose ONLY rejection is "not an
+    # upgrade" -- the case where deleting the existing file is certain to be the
+    # whole fix. Off, the sweep also clears items carrying other complaints
+    # alongside it, which may stay blocked after the delete. Manual force-import
+    # from the dashboard ignores this and clears everything either way.
+    "auto_import_upgrade_only": True,
 
     # Second demotion track. Unlike the free-space loop this isn't space-driven:
     # the user picks titles by assigning them to hd_profile_name in Radarr (e.g.
