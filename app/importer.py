@@ -21,10 +21,12 @@ The fix
 -------
 Do exactly what that human did, on a schedule:
 
-  1. Delete the existing file first. Radarr sends it to the Recycle Bin (so it
-     stays recoverable for the retention window, and the manifest's "a demotion
-     can be reversed" promise still holds), and it also removes the thing the
-     upgrade check was comparing against.
+  1. Delete the existing file first. That removes the thing the upgrade check
+     was comparing against. If Radarr has a Recycle Bin configured the file
+     lands there and stays recoverable for the retention window; if it doesn't,
+     the delete is permanent and the space is free immediately. Either way the
+     sweep runs -- a missing Recycle Bin is Radarr's configuration choice, not a
+     reason to leave downloads parked forever.
   2. Issue ManualImport for the downloaded file. Manual import bypasses the
      upgrade specification by design -- that is the entire reason the dialog
      lets you click Import next to a red rejection.
@@ -58,9 +60,12 @@ _UPGRADE_BLOCK_MARKERS = (
 )
 
 
+def _is_upgrade_msg(msg: str) -> bool:
+    return any(m in msg.lower() for m in _UPGRADE_BLOCK_MARKERS)
+
+
 def _is_upgrade_block(messages: list[str]) -> bool:
-    return any(any(m in msg.lower() for m in _UPGRADE_BLOCK_MARKERS)
-               for msg in messages)
+    return any(_is_upgrade_msg(msg) for msg in messages)
 
 
 def _status_messages(record: dict) -> list[str]:
@@ -80,9 +85,50 @@ def _status_messages(record: dict) -> list[str]:
     return out
 
 
-def stuck_items(radarr: Radarr, managed_profile_ids: set[int]) -> list[dict]:
+def _rejection_reasons(record: dict) -> list[str]:
+    """Just the rejection reasons, without the surrounding noise.
+
+    A statusMessages entry is {title: <the release file name>, messages: [...]},
+    so the titles are context, not reasons -- including them would make every
+    item look like it had a non-upgrade blocker. Plain-string entries have
+    nowhere else to put the reason, so those count.
+    """
+    out: list[str] = []
+    for sm in record.get("statusMessages") or []:
+        if isinstance(sm, str):
+            out.append(sm)
+        else:
+            out.extend(str(m) for m in (sm.get("messages") or []))
+    if record.get("errorMessage"):
+        out.append(str(record["errorMessage"]))
+    out = [r for r in out if r.strip()]
+    # Some versions put the rejection in the title with no messages list at all.
+    # Falling back to the flattened form beats reporting "no reasons" and
+    # skipping an item that is blocked on exactly what we handle.
+    return out or [m for m in _status_messages(record) if m.strip()]
+
+
+def _upgrade_block_only(record: dict) -> bool:
+    """True when *every* reason Radarr gives is the downgrade rejection.
+
+    This is the safe subset to clear unattended: nothing else is wrong with the
+    download, so deleting the existing file and importing is guaranteed to be
+    the whole fix. An item that is also missing a movie match, or is a sample,
+    or failed its hash check, would still be blocked after the delete -- and we
+    would have destroyed the existing file for nothing.
+    """
+    reasons = _rejection_reasons(record)
+    return bool(reasons) and all(_is_upgrade_msg(r) for r in reasons)
+
+
+def stuck_items(radarr: Radarr, managed_profile_ids: set[int],
+                upgrade_only: bool = False) -> list[dict]:
     """Queue entries that finished downloading but are blocked on the downgrade
-    rejection, restricted to movies on a curator-managed profile."""
+    rejection, restricted to movies on a curator-managed profile.
+
+    With upgrade_only, an item also has to have *no other* rejection reason --
+    see _upgrade_block_only.
+    """
     out = []
     for rec in radarr.queue():
         if not rec.get("movieId"):
@@ -95,6 +141,8 @@ def stuck_items(radarr: Radarr, managed_profile_ids: set[int]) -> list[dict]:
                 and tds not in ("warning", "error"):
             continue
         if not _is_upgrade_block(_status_messages(rec)):
+            continue
+        if upgrade_only and not _upgrade_block_only(rec):
             continue
         movie = rec.get("movie") or {}
         pid = movie.get("qualityProfileId")
@@ -172,7 +220,8 @@ def force_import(radarr: Radarr, record: dict, dry: bool = True) -> dict:
                 "from": old_tier, "to": new_tier}
 
     try:
-        # Step 1 -- clear the blocker. Goes to the Recycle Bin, not oblivion.
+        # Step 1 -- clear the blocker. Radarr routes this through the Recycle
+        # Bin if one is configured; otherwise it is a permanent delete.
         if mf.get("id"):
             radarr.delete_movie_file(int(mf["id"]))
         # Step 2 -- import past the rejection.
@@ -183,8 +232,9 @@ def force_import(radarr: Radarr, record: dict, dry: bool = True) -> dict:
         return {"title": title, "ok": True, "from": old_tier, "to": new_tier,
                 "freed_gb": old_size / GB}
     except Exception as e:  # noqa: BLE001
-        # A failure after the delete leaves the movie fileless with the old file
-        # in the Recycle Bin -- recoverable, and loud in the manifest.
+        # A failure after the delete leaves the movie fileless -- recoverable
+        # from the Recycle Bin if there is one, and loud in the manifest either
+        # way. This is what auto_import_upgrade_only exists to make rare.
         db.update_action(aid, "failed", str(e)[:300])
         return {"title": title, "ok": False, "detail": str(e)[:200]}
 
@@ -198,25 +248,17 @@ def run_import_sweep(force: bool = False) -> dict:
     dry = bool(settings.get("dry_run", True))
     radarr = radarr_from_env()
 
-    # Step 1 of a force-import deletes the existing file. That is only a
-    # *reversible* act if Radarr has a Recycle Bin configured -- without one the
-    # DELETE is permanent, and this sweep would quietly shred remuxes at machine
-    # speed the first time it ran. Refuse rather than find that out afterwards.
-    if not dry and not settings.get("allow_permanent_delete"):
+    # Step 1 of a force-import deletes the existing file. A Recycle Bin makes
+    # that reversible for the retention window and is worth configuring, but its
+    # absence is not a blocker: without one the delete is permanent and the
+    # space is free immediately, which is the outcome the sweep exists to
+    # produce. The manifest still records what was removed either way.
+    permanent = False
+    if not dry:
         try:
-            bin_path = (radarr.media_management() or {}).get("recycleBin")
-        except Exception as e:  # noqa: BLE001
-            return {"acted": False, "error": f"could not read Radarr media "
-                                             f"management config: {e}"}
-        if not bin_path:
-            msg = ("refusing to force-import: Radarr has no Recycle Bin "
-                   "configured, so deleting the existing file would be "
-                   "permanent. Either set it in Radarr -> Settings -> Media "
-                   "Management -> File Management -> Recycle Bin, or turn on "
-                   "'Allow permanent delete' in media-curator Settings to "
-                   "accept irreversible demotions.")
-            db.log_run("import", False, msg)
-            return {"acted": False, "error": msg}
+            permanent = not (radarr.media_management() or {}).get("recycleBin")
+        except Exception:  # noqa: BLE001
+            permanent = True  # unknown; report the cautious reading
 
     from .loop import find_archive_profile, managed_grab_profiles
     managed = {int(p["id"]) for p in managed_grab_profiles(radarr, settings)}
@@ -224,7 +266,11 @@ def run_import_sweep(force: bool = False) -> dict:
     if arch:
         managed.add(int(arch["id"]))
 
-    stuck = stuck_items(radarr, managed)
+    # Unattended runs default to the strict subset -- only downloads whose sole
+    # complaint is the downgrade rejection. A manual force from the dashboard is
+    # a human deciding, so it clears anything blocked on the rejection at all.
+    upgrade_only = bool(settings.get("auto_import_upgrade_only", True)) and not force
+    stuck = stuck_items(radarr, managed, upgrade_only=upgrade_only)
     throttle = float(settings.get("import_throttle_seconds", 2))
     results = []
     for rec in stuck:
@@ -233,9 +279,12 @@ def run_import_sweep(force: bool = False) -> dict:
 
     ok = sum(1 for r in results if r.get("ok"))
     summary = (f"{'DRY-RUN: ' if dry else ''}{ok}/{len(stuck)} blocked "
-               f"import(s) forced")
+               f"import(s) forced"
+               + (" (no Recycle Bin -- deletes were permanent)"
+                  if permanent and ok else ""))
     db.log_run("import", True, summary)
     return {"acted": bool(stuck), "stuck": len(stuck), "imported": ok,
+            "permanent_delete": permanent, "upgrade_only": upgrade_only,
             "results": results, "summary": summary}
 
 
