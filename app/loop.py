@@ -105,13 +105,24 @@ def recycle_bin_bytes(radarr: Radarr) -> int:
         return 0        # primary guard, this is a refinement.
 
 
-def in_flight_bytes() -> int:
-    """Reclaim already committed but not yet reflected on disk."""
-    row = db.conn().execute(
-        "SELECT COALESCE(SUM(old_size),0) AS s FROM manifest "
+def in_flight_bytes(radarr: Radarr) -> int:
+    """Reclaim already committed but not yet reflected on disk.
+
+    A manifest row flips to 'grabbed' the moment Radarr accepts the grab and
+    is never revisited -- nothing marks it 'imported' once the swap lands.
+    Restricting to movies still in Radarr's queue keeps this self-clearing:
+    present while downloading or stuck on the upgrade rejection, gone the
+    moment it imports or the grab fails -- the same signal _queued_movie_ids()
+    uses for the rules/HD track.
+    """
+    queued = _queued_movie_ids(radarr)
+    if not queued:
+        return 0
+    rows = db.conn().execute(
+        "SELECT movie_id, old_size FROM manifest "
         "WHERE dry_run=0 AND status IN ('grabbed','pending')"
-    ).fetchone()
-    return int(row["s"] or 0)
+    ).fetchall()
+    return sum(int(r["old_size"] or 0) for r in rows if r["movie_id"] in queued)
 
 
 def _queued_movie_ids(radarr: Radarr) -> set[int]:
@@ -135,10 +146,12 @@ def status() -> dict:
     target = float(settings["free_space_target_gb"]) * GB
     hyst = float(settings["hysteresis_gb"]) * GB
 
-    pending = in_flight_bytes()
+    pending = 0
     bin_bytes = 0
     try:
-        bin_bytes = recycle_bin_bytes(radarr_from_env())
+        radarr = radarr_from_env()
+        pending = in_flight_bytes(radarr)
+        bin_bytes = recycle_bin_bytes(radarr)
     except Exception:  # noqa: BLE001
         pass
 
@@ -380,6 +393,24 @@ def _profile_top_tier(profile: dict) -> str | None:
     return allowed[-1] if allowed else None
 
 
+def _profile_quality_rank(profile: dict) -> dict[str, int]:
+    """Every quality Radarr knows, ranked low->high by THIS profile's own item
+    order -- not just the allowed subset. A profile's item order is what
+    Radarr itself uses to decide what outranks what for grabs on that profile,
+    and it's per-profile customizable (Archive-4K deliberately drags
+    WEBDL-2160p to the top, ahead of Remux-2160p, to make it the ceiling). Using
+    the profile's own order rather than a separate global fetch keeps a tier's
+    rank consistent with whatever reordering that profile relies on."""
+    order: list[str] = []
+    for it in profile.get("items") or []:
+        if it.get("items"):
+            for s in it["items"]:
+                order.append((s.get("quality") or {}).get("name"))
+        else:
+            order.append((it.get("quality") or {}).get("name"))
+    return {name: i for i, name in enumerate(order) if name}
+
+
 def managed_grab_profiles(radarr: Radarr, settings: dict) -> list[dict]:
     """Profiles the curator force-grabs cutoff-unmet titles for: every profile
     named by a rule, plus the Archive-HD profile if that track is enabled."""
@@ -399,13 +430,24 @@ def managed_grab_profiles(radarr: Radarr, settings: dict) -> list[dict]:
 
 def profile_pending(profile: dict, movies: list[dict], queued: set[int],
                     target: str | None = None) -> dict:
-    """Movies on a profile whose file is a quality the profile does NOT allow --
-    i.e. an out-of-profile file (a Remux-2160p on a 1080p profile), which is the
-    thing to demote. A file already within the allowed set is satisfied and left
-    alone, so a grab never *upgrades* an in-profile title. Excludes titles
-    already downloading."""
+    """Movies on a profile whose file OUTRANKS every allowed quality -- i.e. an
+    out-of-profile file (a Remux-2160p on a 1080p profile), which is the thing
+    to demote. A file already within the allowed set is satisfied and left
+    alone, so a grab never *upgrades* an in-profile title.
+
+    A file that ranks BELOW every allowed quality is left alone too -- it was
+    never a remux to begin with (some WEBDL-720p or DVD title already on this
+    profile), so this isn't a demotion, it's an upgrade. Routing it through
+    _grab_profile would cap the replacement's size at that already-tiny
+    existing file (the demotion size guard), which only a mislabeled or
+    garbage-quality "1080p" release could ever satisfy -- exactly the kind of
+    release that looks like a downgrade despite matching the quality label.
+
+    Excludes titles already downloading."""
     target = target or _profile_top_tier(profile)
     allowed = set(_profile_allowed(profile))
+    rank = _profile_quality_rank(profile)
+    top_rank = max((rank[a] for a in allowed if a in rank), default=None)
     pending = []
     if target:
         for m in movies:
@@ -416,6 +458,8 @@ def profile_pending(profile: dict, movies: list[dict], queued: set[int],
                 continue
             tier = ((mf.get("quality") or {}).get("quality") or {}).get("name")
             if tier in allowed or int(m["id"]) in queued:
+                continue
+            if top_rank is not None and rank.get(tier, -1) < top_rank:
                 continue
             pending.append(m)
     return {"profile": profile, "target": target, "allowed": sorted(allowed),
