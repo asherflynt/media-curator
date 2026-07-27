@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block body %}
 {% if request.query_params.get('saved') %}<div class="note ok">Saved.</div>{% endif %}
+{% if error %}<div class="note bad">{{ error }}</div>{% endif %}
 
 <form method="post" action="/settings">
 <div class="panel">

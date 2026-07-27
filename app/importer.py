@@ -57,11 +57,30 @@ _UPGRADE_BLOCK_MARKERS = (
     "not an upgrade for existing movie file",
     "not an upgrade for existing",
     "existing quality",
+    # Same-rank comparisons (e.g. two members of one quality group) are refused
+    # with these instead. Manual import bypasses them just the same.
+    "not a quality revision upgrade for existing",
+    "not a custom format upgrade for existing",
 )
 
 
 def _is_upgrade_msg(msg: str) -> bool:
     return any(m in msg.lower() for m in _UPGRADE_BLOCK_MARKERS)
+
+
+def _is_sample_msg(msg: str) -> bool:
+    """Radarr's NotSampleSpecification rejection. A download that bundles a
+    sample.mkv beside the feature carries one of these for the sample file --
+    it is not a reason the feature can't import."""
+    return msg.strip().lower().startswith("sample")
+
+
+def _reason_text(rej: object) -> str:
+    """Rejections are plain strings on queue/release records but
+    {reason, type} objects on manual-import records."""
+    if isinstance(rej, dict):
+        return str(rej.get("reason") or "")
+    return str(rej or "")
 
 
 def _is_upgrade_block(messages: list[str]) -> bool:
@@ -79,9 +98,8 @@ def _status_messages(record: dict) -> list[str]:
         if title:
             out.append(str(title))
         out.extend(str(m) for m in (sm.get("messages") or []))
-    for key in ("errorMessage", "trackedDownloadStatusMessage"):
-        if record.get(key):
-            out.append(str(record[key]))
+    if record.get("errorMessage"):
+        out.append(str(record["errorMessage"]))
     return out
 
 
@@ -97,8 +115,14 @@ def _rejection_reasons(record: dict) -> list[str]:
     for sm in record.get("statusMessages") or []:
         if isinstance(sm, str):
             out.append(sm)
-        else:
-            out.extend(str(m) for m in (sm.get("messages") or []))
+            continue
+        msgs = [str(m) for m in (sm.get("messages") or []) if str(m).strip()]
+        # Multi-file downloads get one entry per file. An entry whose only
+        # complaint is "Sample" describes the bundled sample, not the feature;
+        # counting it would make every release with a sample look unsafe.
+        if msgs and all(_is_sample_msg(m) for m in msgs):
+            continue
+        out.extend(msgs)
     if record.get("errorMessage"):
         out.append(str(record["errorMessage"]))
     out = [r for r in out if r.strip()]
@@ -129,6 +153,12 @@ def stuck_items(radarr: Radarr, managed_profile_ids: set[int],
     With upgrade_only, an item also has to have *no other* rejection reason --
     see _upgrade_block_only.
     """
+    if not managed_profile_ids:
+        # No curator-managed profile exists (or none could be read). An empty
+        # filter must mean "nothing is ours", never "everything is" -- otherwise
+        # a user's ordinary refused downgrade on any profile would get its
+        # existing file deleted.
+        return []
     out = []
     for rec in radarr.queue():
         if not rec.get("movieId"):
@@ -146,7 +176,7 @@ def stuck_items(radarr: Radarr, managed_profile_ids: set[int],
             continue
         movie = rec.get("movie") or {}
         pid = movie.get("qualityProfileId")
-        if managed_profile_ids and pid not in managed_profile_ids:
+        if pid not in managed_profile_ids:
             continue
         out.append(rec)
     return out
@@ -155,21 +185,29 @@ def stuck_items(radarr: Radarr, managed_profile_ids: set[int],
 def _importable_file(radarr: Radarr, download_id: str, movie_id: int) -> dict | None:
     """The one real video file in a finished download.
 
-    Rejections on these entries are ignored on purpose -- the upgrade rejection
-    is precisely what we are overriding. The largest file wins, which is how
-    samples and extras get left behind.
+    The largest file wins, which is how samples and extras get left behind.
+    Its rejections are returned alongside: only the upgrade rejection is ours to
+    override, and force_import refuses to delete anything if the chosen file
+    has any other reason it would not import.
     """
     try:
-        cands = radarr.manual_import_candidates(download_id)
+        cands = radarr.manual_import_candidates(download_id, movie_id)
     except Exception:  # noqa: BLE001
         return None
     usable = [c for c in cands if c.get("path") and int(c.get("size") or 0) > 0]
     if not usable:
         return None
     best = max(usable, key=lambda c: int(c.get("size") or 0))
+    # Manual-import records carry the matched movie as an object; older builds
+    # and our fakes used a flat movieId.
+    cand_movie = (best.get("movie") or {}).get("id") or best.get("movieId")
+    blockers = [t for t in (_reason_text(r) for r in best.get("rejections") or [])
+                if t.strip() and not _is_upgrade_msg(t)]
     return {
+        "blockers": blockers,
         "path": best["path"],
-        "movieId": int(best.get("movieId") or movie_id),
+        "folderName": best.get("folderName") or "",
+        "movieId": int(cand_movie or movie_id),
         "quality": best.get("quality"),
         "languages": best.get("languages") or [],
         "releaseGroup": best.get("releaseGroup") or "",
@@ -206,6 +244,19 @@ def force_import(radarr: Radarr, record: dict, dry: bool = True) -> dict:
                 "detail": "no importable file found for this download"}
     new_tier = ((incoming.get("quality") or {}).get("quality") or {}).get("name")
 
+    blockers = incoming.pop("blockers", [])
+    if blockers:
+        # Deleting the existing file only clears the upgrade rejection. Anything
+        # else (still unpacking, no audio, wrong movie, ...) would survive the
+        # delete, leaving the movie with no file at all. Leave it for a human.
+        return {"title": title, "ok": False,
+                "detail": "download has other import rejections, not touching "
+                          "it: " + "; ".join(blockers)[:200]}
+    if int(incoming["movieId"]) != movie_id:
+        return {"title": title, "ok": False,
+                "detail": f"download matched a different movie "
+                          f"(id {incoming['movieId']}), not touching it"}
+
     aid = db.record_action(
         movie_id=movie_id, title=title, action="import", old_tier=old_tier,
         old_size=old_size, new_profile_id=fresh.get("qualityProfileId"),
@@ -225,18 +276,62 @@ def force_import(radarr: Radarr, record: dict, dry: bool = True) -> dict:
         if mf.get("id"):
             radarr.delete_movie_file(int(mf["id"]))
         # Step 2 -- import past the rejection.
-        radarr.command("ManualImport", importMode="auto", files=[{
+        cmd = radarr.command("ManualImport", importMode="auto", files=[{
             k: v for k, v in incoming.items() if k != "size"
         }])
+    except Exception as e:  # noqa: BLE001
+        db.update_action(aid, "failed", str(e)[:300])
+        return {"title": title, "ok": False, "detail": str(e)[:200]}
+
+    # Step 3 -- confirm it landed. POST /command only QUEUES the import, so a
+    # 201 says nothing about the outcome; without this check a failed import
+    # after the delete would be recorded as a success and the movie silently
+    # left with no file.
+    return _confirm_import(radarr, aid, title, movie_id, cmd, old_tier, new_tier,
+                           old_size, mf.get("id"))
+
+
+def _confirm_import(radarr: Radarr, aid: int, title: str, movie_id: int,
+                    cmd: object, old_tier: str | None, new_tier: str | None,
+                    old_size: int, old_file_id: object) -> dict:
+    cmd_status = ""
+    try:
+        cid = (cmd or {}).get("id") if isinstance(cmd, dict) else None
+        if cid is not None:
+            st = radarr.wait_for_command(int(cid), timeout=180.0)
+            cmd_status = str(st.get("status") or "").lower()
+            if cmd_status in ("failed", "aborted", "cancelled", "orphaned"):
+                msg = (f"ManualImport {cmd_status}: "
+                       f"{st.get('message') or st.get('exception') or ''}").strip()
+                return _import_failed(aid, title, msg)
+        after = radarr.movie(movie_id)
+    except Exception as e:  # noqa: BLE001
+        return _import_failed(aid, title, f"could not confirm import: {e}")
+
+    nf = after.get("movieFile") or {}
+    if nf.get("id") and nf.get("id") != old_file_id:
         db.update_action(aid, "imported")
         return {"title": title, "ok": True, "from": old_tier, "to": new_tier,
                 "freed_gb": old_size / GB}
-    except Exception as e:  # noqa: BLE001
-        # A failure after the delete leaves the movie fileless -- recoverable
-        # from the Recycle Bin if there is one, and loud in the manifest either
-        # way. This is what auto_import_upgrade_only exists to make rare.
-        db.update_action(aid, "failed", str(e)[:300])
-        return {"title": title, "ok": False, "detail": str(e)[:200]}
+    if cmd_status and cmd_status != "completed":
+        # Still running after the wait (a slow cross-disk copy). Not a failure
+        # yet, but not a success either -- say so rather than guess.
+        db.update_action(aid, "submitted",
+                         f"ManualImport still {cmd_status}; check Radarr")
+        return {"title": title, "ok": True, "pending": True, "from": old_tier,
+                "to": new_tier, "detail": f"import still {cmd_status}"}
+    return _import_failed(aid, title, "Radarr reports no file for this movie "
+                                      "after the import")
+
+
+def _import_failed(aid: int, title: str, why: str) -> dict:
+    """A failure AFTER the delete: the movie may have no file now. Loud, and
+    pointed at the recovery path."""
+    detail = (f"{why} -- the old file was already deleted; restore it from "
+              f"Radarr's Recycle Bin if one is configured, or re-import the "
+              f"download by hand")
+    db.update_action(aid, "failed", detail[:300])
+    return {"title": title, "ok": False, "detail": detail[:200]}
 
 
 def run_import_sweep(force: bool = False) -> dict:

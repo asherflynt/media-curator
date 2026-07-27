@@ -48,42 +48,43 @@ def validate_archive_profile(profile: dict, archive_tier: str) -> dict:
     re-upgraded straight back to remux. Fail loudly rather than discover that
     after 400 downloads.
     """
-    items = profile.get("items") or []
-    allowed: list[str] = []
-    for it in items:
-        # Groups nest their members under 'items'.
-        if it.get("items"):
-            for sub in it["items"]:
-                if sub.get("allowed"):
-                    allowed.append((sub.get("quality") or {}).get("name", "?"))
-        elif it.get("allowed"):
-            allowed.append((it.get("quality") or {}).get("name", "?"))
+    buckets = _profile_buckets(profile)
+    allowed = _profile_allowed(profile)
 
     if not allowed:
         return {"ok": False, "reason": "profile has no allowed qualities",
                 "top": None, "allowed": allowed}
 
+    # The highest-ranked ALLOWED item may be a quality group (Radarr's default
+    # "WEB 2160p" holds WEBDL-2160p and WEBRip-2160p at equal rank). The archive
+    # tier only has to be a member of that top bucket -- nothing outranks it.
+    top_bucket = [b for b in buckets if b["allowed"]][-1]
     top = allowed[-1]  # Radarr orders ascending; last allowed ranks highest.
-    if top.lower() != archive_tier.lower():
+    if archive_tier.lower() not in {n.lower() for n in top_bucket["names"]}:
+        top_label = top_bucket["label"] or top
         return {
             "ok": False,
             "top": top,
             "allowed": allowed,
             "reason": (
-                f"'{top}' outranks '{archive_tier}' in the {profile.get('name')} "
-                f"profile. Demoted titles will be re-upgraded straight back. "
-                f"Drag {archive_tier} to the TOP of the quality ordering."
+                f"'{top_label}' outranks '{archive_tier}' in the "
+                f"{profile.get('name')} profile. Demoted titles will be "
+                f"re-upgraded straight back. Drag {archive_tier} to the TOP of "
+                f"the quality ordering."
             ),
         }
 
+    # The cutoff is either a single quality's id or -- when it is a group -- the
+    # group's own id (1000+), with no 'quality' object on the item.
     cutoff_ok = True
     cutoff_name = None
-    for it in items:
-        q = it.get("quality") or {}
-        if q.get("id") == profile.get("cutoff"):
-            cutoff_name = q.get("name")
-    if cutoff_name and cutoff_name.lower() != archive_tier.lower():
-        cutoff_ok = False
+    cutoff = profile.get("cutoff")
+    for b in buckets:
+        if cutoff is not None and cutoff in b["ids"]:
+            cutoff_name = b["label"]
+            if archive_tier.lower() not in {n.lower() for n in b["names"]}:
+                cutoff_ok = False
+            break
 
     return {"ok": True, "top": top, "allowed": allowed, "cutoff": cutoff_name,
             "cutoff_ok": cutoff_ok, "reason": ""}
@@ -133,8 +134,7 @@ def _queued_movie_ids(radarr: Radarr) -> set[int]:
     failed one becomes eligible again on a later pass.
     """
     try:
-        q = radarr.get("queue", params={"pageSize": 1000}) or {}
-        return {int(r["movieId"]) for r in q.get("records", [])
+        return {int(r["movieId"]) for r in radarr.queue(include_movie=False)
                 if r.get("movieId") is not None}
     except Exception:  # noqa: BLE001
         return set()
@@ -218,8 +218,11 @@ _SOFT_REJECTION_MARKERS = (
     "meets cutoff",
     "not an upgrade",
     "not wanted in profile",
+    "meets quality cutoff",
+    "custom format cutoff",
     "existing file",
-    "higher preferred",
+    "higher preference",  # "...has an equal or higher preference" (Radarr 5+)
+    "higher preferred",   # older wording, kept for older Radarr builds
 )
 
 
@@ -245,9 +248,14 @@ def _tier_ladder(profile: dict, current_tier: str | None, depth: int) -> list[st
     """
     ladder = [t for t in reversed(_profile_allowed(profile)) if t]
     if current_tier:
+        rank = {k.lower(): v for k, v in _profile_quality_rank(profile).items()}
         lowered = [t.lower() for t in ladder]
         if current_tier.lower() in lowered:
-            ladder = ladder[lowered.index(current_tier.lower()) + 1:]
+            # Strictly below the current file's rank: a grouped peer (WEBRip
+            # next to a WEBDL in "WEB 1080p") is an equal, not a demotion.
+            cur = rank.get(current_tier.lower())
+            ladder = [t for t in ladder[lowered.index(current_tier.lower()) + 1:]
+                      if cur is None or rank.get(t.lower(), -1) < cur]
     return ladder[:max(1, int(depth) + 1)]
 
 
@@ -398,17 +406,40 @@ def run_once(force: bool = False) -> dict:
             "summary": summary}
 
 
-def _profile_allowed(profile: dict) -> list[str]:
-    """Allowed quality names, low->high."""
-    allowed: list[str] = []
+def _profile_buckets(profile: dict) -> list[dict]:
+    """A profile's top-level items, low->high, as rank buckets.
+
+    A plain item is a bucket of one quality. A quality GROUP is one bucket whose
+    members all share the group's rank -- Radarr compares grouped qualities as
+    equals. The group's own 'allowed' flag is the authoritative one: Radarr
+    ignores the members' flags (and they drift out of sync when qualities are
+    dragged in and out of groups, or a profile is written by Recyclarr/the API).
+    A group with no 'allowed' key at all falls back to its members' flags.
+    """
+    out: list[dict] = []
     for it in profile.get("items") or []:
-        if it.get("items"):
-            for s in it["items"]:
-                if s.get("allowed"):
-                    allowed.append((s.get("quality") or {}).get("name"))
-        elif it.get("allowed"):
-            allowed.append((it.get("quality") or {}).get("name"))
-    return allowed
+        subs = it.get("items") or []
+        if subs:
+            names = [(s.get("quality") or {}).get("name") for s in subs]
+            names = [n for n in names if n]
+            allowed = (bool(it["allowed"]) if "allowed" in it
+                       else any(s.get("allowed") for s in subs))
+            ids = {it.get("id")} | {(s.get("quality") or {}).get("id") for s in subs}
+            out.append({"names": names, "allowed": allowed,
+                        "label": it.get("name") or (names[-1] if names else None),
+                        "ids": {i for i in ids if i is not None}})
+        else:
+            q = it.get("quality") or {}
+            name = q.get("name")
+            out.append({"names": [name] if name else [],
+                        "allowed": bool(it.get("allowed")), "label": name,
+                        "ids": {q.get("id")} if q.get("id") is not None else set()})
+    return out
+
+
+def _profile_allowed(profile: dict) -> list[str]:
+    """Allowed quality names, low->high (group members in their listed order)."""
+    return [n for b in _profile_buckets(profile) if b["allowed"] for n in b["names"]]
 
 
 def _profile_top_tier(profile: dict) -> str | None:
@@ -425,14 +456,11 @@ def _profile_quality_rank(profile: dict) -> dict[str, int]:
     WEBDL-2160p to the top, ahead of Remux-2160p, to make it the ceiling). Using
     the profile's own order rather than a separate global fetch keeps a tier's
     rank consistent with whatever reordering that profile relies on."""
-    order: list[str] = []
-    for it in profile.get("items") or []:
-        if it.get("items"):
-            for s in it["items"]:
-                order.append((s.get("quality") or {}).get("name"))
-        else:
-            order.append((it.get("quality") or {}).get("name"))
-    return {name: i for i, name in enumerate(order) if name}
+    rank: dict[str, int] = {}
+    for i, b in enumerate(_profile_buckets(profile)):
+        for name in b["names"]:
+            rank[name] = i  # members of one group share a rank, as in Radarr
+    return rank
 
 
 def managed_grab_profiles(radarr: Radarr, settings: dict) -> list[dict]:

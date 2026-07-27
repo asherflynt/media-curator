@@ -36,7 +36,15 @@ class ArrClient:
             raise ArrError(f"{method} {path}: HTTP {r.status_code}: {r.text[:300]}")
         if not r.content:
             return None
-        return r.json()
+        try:
+            return r.json()
+        except ValueError as e:
+            # A URL missing Radarr's URL Base (or pointing at a reverse-proxy
+            # login page) answers 200 with the web UI's HTML, not JSON.
+            raise ArrError(
+                f"{method} {path}: response was not JSON -- check the URL "
+                f"(including any URL Base) points at the API"
+            ) from e
 
     def get(self, path: str, **kw: Any) -> Any:
         return self._req("GET", path, **kw)
@@ -93,10 +101,21 @@ class Radarr(ArrClient):
         and only then replaces the existing file (old one -> Recycle Bin)."""
         return self.post("release", json={"guid": guid, "indexerId": indexer_id})
 
-    def queue(self, page_size: int = 1000) -> list[dict]:
-        q = self.get("queue", params={"pageSize": page_size,
-                                      "includeMovie": "true"}) or {}
-        return q.get("records", [])
+    def queue(self, page_size: int = 500, include_movie: bool = True) -> list[dict]:
+        """Every queue record, following pagination (a single page silently
+        truncated large queues)."""
+        out: list[dict] = []
+        page = 1
+        while True:
+            q = self.get("queue", params={
+                "page": page, "pageSize": page_size,
+                "includeMovie": "true" if include_movie else "false"}) or {}
+            recs = q.get("records") or []
+            out.extend(recs)
+            total = int(q.get("totalRecords") or 0)
+            if not recs or len(out) >= total or page >= 100:
+                return out
+            page += 1
 
     def delete_movie_file(self, movie_file_id: int) -> Any:
         """Delete the current file for a movie. Honours Radarr's Recycle Bin
@@ -104,15 +123,39 @@ class Radarr(ArrClient):
         whole basis of the manifest's 'a demotion can be reversed' claim."""
         return self.delete(f"moviefile/{int(movie_file_id)}")
 
-    def manual_import_candidates(self, download_id: str) -> list[dict]:
+    def manual_import_candidates(self, download_id: str,
+                                 movie_id: int | None = None) -> list[dict]:
         """What Radarr's manual-import dialog would show for a finished
-        download, including its own rejections (which we deliberately ignore --
-        see importer.py)."""
-        return self.get("manualimport", params={
-            "downloadId": download_id, "filterExistingFiles": "false"}) or []
+        download, including its own per-file rejections (importer.py decides
+        which of those it is safe to override)."""
+        params: dict[str, Any] = {"downloadId": download_id,
+                                  "filterExistingFiles": "false"}
+        if movie_id:
+            params["movieId"] = int(movie_id)
+        return self.get("manualimport", params=params) or []
 
     def command(self, name: str, **body: Any) -> Any:
         return self.post("command", json={"name": name, **body})
+
+    def command_status(self, command_id: int) -> dict:
+        return self.get(f"command/{int(command_id)}") or {}
+
+    def wait_for_command(self, command_id: int, timeout: float = 300.0,
+                         interval: float = 3.0) -> dict:
+        """Poll a queued command until it finishes. POST /command only QUEUES
+        work; success of the POST says nothing about the outcome. Returns the
+        last status seen -- check its 'status' ('completed', 'failed', ...)."""
+        import time
+        deadline = time.monotonic() + timeout
+        st: dict = {}
+        while True:
+            st = self.command_status(command_id)
+            if str(st.get("status") or "").lower() in (
+                    "completed", "failed", "aborted", "cancelled", "orphaned"):
+                return st
+            if time.monotonic() >= deadline:
+                return st
+            time.sleep(interval)
 
     def root_folders(self) -> list[dict]:
         return self.get("rootfolder") or []

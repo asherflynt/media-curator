@@ -29,9 +29,9 @@
       <td style="text-align:right">
         <form method="post" action="/blocklist/add" style="display:inline">
           <input type="hidden" name="movie_id" value="{{ m.id }}">
-          <input type="hidden" name="tmdb_id" value="{{ m.tmdbId }}">
+          <input type="hidden" name="tmdb_id" value="{{ m.tmdbId or '' }}">
           <input type="hidden" name="title" value="{{ m.title }}">
-          <input type="hidden" name="year" value="{{ m.year }}">
+          <input type="hidden" name="year" value="{{ m.year or '' }}">
           <input type="hidden" name="reason" value="manual">
           <input type="hidden" name="back" value="/blocklist?q={{ q|urlencode }}">
           <button type="submit" class="ghost">Block</button>

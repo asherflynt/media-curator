@@ -104,7 +104,7 @@
       <td class="num">{{ '{:,.0f}'.format(t.gb) }}</td>
       <td class="num">{{ t.count }}</td>
       <td class="num">{{ '%.1f'|format(t.avg_gb) }}</td>
-      <td style="width:40%"><div class="bar"><i style="width:{{ (t.gb/tiers[0].gb*100)|round }}%"></i></div></td>
+      <td style="width:40%"><div class="bar"><i style="width:{{ ((t.gb / tiers[0].gb * 100) if tiers[0].gb else 0)|round }}%"></i></div></td>
     </tr>
     {% endfor %}
   </table></div>

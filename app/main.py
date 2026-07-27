@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import os
+import threading
 import traceback
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from fastapi import FastAPI, Form, Request
+from fastapi import BackgroundTasks, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -31,32 +33,56 @@ templates.env.filters["datetimeformat"] = _datetimeformat
 scheduler = BackgroundScheduler()
 
 
+_SCHEDULE_KEYS = ("audit_cron_day", "audit_cron_hour", "loop_interval_minutes",
+                  "import_interval_minutes")
+
+
+def _triggers(s: dict) -> dict:
+    """Build every trigger from settings, raising ValueError on a bad value.
+
+    Kept separate from _schedule so a bad value can be rejected BEFORE it is
+    saved, instead of being discovered after the jobs were already removed (or
+    on the next container start, where it would stop the app booting)."""
+    def minutes(key: str) -> int:
+        v = int(float(s[key]))
+        if v < 1:
+            raise ValueError(f"{key} must be at least 1 minute")
+        return v
+    hour = int(float(s["audit_cron_hour"]))
+    if not 0 <= hour <= 23:
+        raise ValueError("audit_cron_hour must be between 0 and 23")
+    return {
+        "audit": CronTrigger(day_of_week=str(s["audit_cron_day"]).strip().lower(),
+                             hour=hour),
+        "loop": IntervalTrigger(minutes=minutes("loop_interval_minutes")),
+        "managed": IntervalTrigger(minutes=minutes("loop_interval_minutes")),
+        "import": IntervalTrigger(minutes=minutes("import_interval_minutes")),
+    }
+
+
 def _schedule() -> None:
-    scheduler.remove_all_jobs()
     s = db.all_settings()
-    scheduler.add_job(
-        _safe_audit, CronTrigger(day_of_week=s["audit_cron_day"],
-                                 hour=int(s["audit_cron_hour"])),
-        id="audit", replace_existing=True,
-    )
+    try:
+        trig = _triggers(s)
+    except (KeyError, TypeError, ValueError) as e:
+        # A value stored by an older build, or edited into the DB by hand. Run
+        # on the defaults rather than refuse to start.
+        db.log_run("schedule", False, f"invalid schedule setting ({e}); "
+                                      f"using defaults")
+        trig = _triggers({**s, **{k: db.DEFAULTS[k] for k in _SCHEDULE_KEYS}})
+    scheduler.remove_all_jobs()
+    scheduler.add_job(_safe_audit, trig["audit"], id="audit", replace_existing=True)
     if s.get("loop_enabled"):
-        scheduler.add_job(
-            _safe_loop, IntervalTrigger(minutes=int(s["loop_interval_minutes"])),
-            id="loop", replace_existing=True,
-        )
+        scheduler.add_job(_safe_loop, trig["loop"], id="loop", replace_existing=True)
     if s.get("hd_track_enabled") or db.rules_enabled():
-        scheduler.add_job(
-            _safe_managed, IntervalTrigger(minutes=int(s["loop_interval_minutes"])),
-            id="managed", replace_existing=True,
-        )
+        scheduler.add_job(_safe_managed, trig["managed"], id="managed",
+                          replace_existing=True)
     if s.get("auto_import_downgrades"):
         # Runs more often than the demotion loop: a grab is worthless until it
         # imports, and every hour a download sits blocked is an hour the space
         # it was meant to reclaim stays occupied by BOTH copies.
-        scheduler.add_job(
-            _safe_import, IntervalTrigger(minutes=int(s["import_interval_minutes"])),
-            id="import", replace_existing=True,
-        )
+        scheduler.add_job(_safe_import, trig["import"], id="import",
+                          replace_existing=True)
 
 
 def _safe_audit() -> None:
@@ -146,12 +172,12 @@ def dashboard(request: Request):
     ctx["runs"] = db.conn().execute(
         "SELECT * FROM runs ORDER BY ts DESC LIMIT 10").fetchall()
     ctx["settings"] = db.all_settings()
-    return templates.TemplateResponse("dashboard.html", ctx)
+    return templates.TemplateResponse(request, "dashboard.html", ctx)
 
 
 @app.get("/connections", response_class=HTMLResponse)
 def connections_page(request: Request):
-    return templates.TemplateResponse("connections.html", {
+    return templates.TemplateResponse(request, "connections.html", {
         "request": request, "page": "connections", "settings": db.all_settings(),
         "radarr": db.connection_display("radarr"),
         "sonarr": db.connection_display("sonarr"),
@@ -178,7 +204,11 @@ async def connections_test(request: Request):
     url = str(form.get("url") or "").strip()
     key = str(form.get("key") or "").strip()
     if not url or not key:
-        url, key = db.get_connection(name)
+        # Fill in only what the form left blank: the key field is blank by
+        # design ("leave blank to keep current"), and testing a new URL must
+        # not silently test the old saved one instead.
+        saved_url, saved_key = db.get_connection(name)
+        url, key = url or (saved_url or ""), key or (saved_key or "")
     if not url or not key:
         return JSONResponse({"ok": False, "error": "URL and API key required"})
     try:
@@ -192,15 +222,24 @@ async def connections_test(request: Request):
 
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request):
-    return templates.TemplateResponse("settings.html", {
+    return templates.TemplateResponse(request, "settings.html", {
         "request": request, "page": "settings", "settings": db.all_settings(),
-        "defaults": db.DEFAULTS,
+        "defaults": db.DEFAULTS, "error": request.query_params.get("error"),
     })
 
 
 @app.post("/settings")
 async def settings_save(request: Request):
     form = await request.form()
+    # Reject an unusable schedule up front -- once stored it would take down
+    # the scheduler, and with it every automatic run.
+    proposed = {**db.all_settings(),
+                **{k: str(form[k]).strip() for k in _SCHEDULE_KEYS if k in form}}
+    try:
+        _triggers(proposed)
+    except (KeyError, TypeError, ValueError) as e:
+        return RedirectResponse(
+            "/settings?error=" + quote(f"Schedule not saved: {e}"), status_code=303)
     for key, default in db.DEFAULTS.items():
         if key not in form:
             if isinstance(default, bool):
@@ -243,7 +282,7 @@ def candidates_page(request: Request):
     except Exception as e:  # noqa: BLE001
         ctx["error"] = str(e)
         ctx["candidates"] = []
-    return templates.TemplateResponse("candidates.html", ctx)
+    return templates.TemplateResponse(request, "candidates.html", ctx)
 
 
 @app.get("/blocklist", response_class=HTMLResponse)
@@ -261,10 +300,20 @@ def blocklist_page(request: Request, q: str = ""):
             matches = sorted(matches, key=lambda m: m.get("title", ""))[:25]
         except Exception:  # noqa: BLE001
             matches = []
-    return templates.TemplateResponse("blocklist.html", {
+    return templates.TemplateResponse(request, "blocklist.html", {
         "request": request, "page": "blocklist", "rows": rows,
         "q": q, "matches": matches, "settings": db.all_settings(),
     })
+
+
+def _opt_int(v: object) -> int | None:
+    """Optional integer form field. Templates can render a missing value as
+    'None' or '', and neither should 500 the request."""
+    try:
+        n = int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+    return n or None
 
 
 @app.post("/blocklist/add")
@@ -276,9 +325,9 @@ async def blocklist_add(request: Request):
         return RedirectResponse("/blocklist", status_code=303)
     db.blocklist_add(
         movie_id=mid,
-        tmdb_id=int(form["tmdb_id"]) if form.get("tmdb_id") else None,
+        tmdb_id=_opt_int(form.get("tmdb_id")),
         title=str(form.get("title") or "") or None,
-        year=int(form["year"]) if form.get("year") else None,
+        year=_opt_int(form.get("year")),
         reason=str(form.get("reason") or "") or None,
     )
     return RedirectResponse(str(form.get("back") or "/blocklist"), status_code=303)
@@ -300,7 +349,7 @@ def audit_page(request: Request):
     counts = db.conn().execute(
         "SELECT klass, COUNT(*) n, COALESCE(SUM(size),0) bytes FROM findings "
         "WHERE dismissed=0 GROUP BY klass ORDER BY n DESC").fetchall()
-    return templates.TemplateResponse("audit.html", {
+    return templates.TemplateResponse(request, "audit.html", {
         "request": request, "page": "audit", "findings": rows, "counts": counts,
         "settings": db.all_settings(),
     })
@@ -325,8 +374,9 @@ def audit_dismiss(fid: int):
 def history_page(request: Request):
     rows = db.conn().execute(
         "SELECT * FROM manifest ORDER BY ts DESC LIMIT 300").fetchall()
-    return templates.TemplateResponse("history.html", {
+    return templates.TemplateResponse(request, "history.html", {
         "request": request, "page": "history", "rows": rows,
+        "settings": db.all_settings(),
     })
 
 
@@ -381,7 +431,7 @@ def rules_page(request: Request):
         ctx["error"] = str(e)
         ctx["collections"] = []
         ctx["managed"] = []
-    return templates.TemplateResponse("rules.html", ctx)
+    return templates.TemplateResponse(request, "rules.html", ctx)
 
 
 @app.post("/rules/add")
@@ -411,24 +461,49 @@ def api_status():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.post("/webhook/import")
-async def webhook_import(request: Request):
-    """Radarr/Sonarr Connect -> Custom Script / Webhook target.
+_audit_lock = threading.Lock()
+_audit_rerun = threading.Event()
 
-    Judges each newly imported file against its cohort immediately, so the
-    library stops accumulating new problems while the backlog is cleared.
+
+def _webhook_audit() -> None:
+    """Coalesced audit for import webhooks. A season pack fires one webhook per
+    episode; at most one audit runs at a time, and any number of webhooks that
+    arrive meanwhile collapse into a single follow-up run."""
+    _audit_rerun.set()
+    if not _audit_lock.acquire(blocking=False):
+        return  # the running audit will see the flag and go again
+    try:
+        while _audit_rerun.is_set():
+            _audit_rerun.clear()
+            try:
+                audit.run_audit(tag=True)
+            except Exception as e:  # noqa: BLE001
+                db.log_run("audit", False, f"webhook audit: {e}"[:500])
+    finally:
+        _audit_lock.release()
+
+
+@app.api_route("/webhook/import", methods=["POST", "PUT"])
+async def webhook_import(request: Request, background: BackgroundTasks):
+    """Radarr/Sonarr Connect -> Webhook target.
+
+    Judges newly imported files against their cohort, so the library stops
+    accumulating new problems while the backlog is cleared. Answers at once and
+    audits in the background: a full audit can outlast Radarr's webhook timeout
+    (100s), and running it inline would also stall every other page.
     """
     try:
         payload = await request.json()
     except Exception:  # noqa: BLE001
         payload = {}
-    event = payload.get("eventType", "")
-    if event not in ("Download", "Upgrade", "Test"):
+    if not isinstance(payload, dict):
+        payload = {}
+    event = str(payload.get("eventType") or "")
+    # Imports and upgrades both arrive as "Download" (with isUpgrade); "Upgrade"
+    # is accepted for older builds.
+    if event.lower() not in ("download", "upgrade", "test"):
         return {"ok": True, "ignored": event}
-    if event == "Test":
+    if event.lower() == "test":
         return {"ok": True, "test": True}
-    try:
-        res = audit.run_audit(tag=True)
-        return {"ok": True, "findings": res["counts"], "new": res["new"]}
-    except Exception as e:  # noqa: BLE001
-        return JSONResponse({"error": str(e)}, status_code=500)
+    background.add_task(_webhook_audit)
+    return JSONResponse({"ok": True, "queued": True}, status_code=202)

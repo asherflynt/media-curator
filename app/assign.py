@@ -84,6 +84,7 @@ def apply_profile_rules(radarr: Radarr | None = None, dry: bool = True,
                       if str(r["profile_name"]).lower() not in prof_ids})
 
     assigned = 0
+    failed: list[str] = []
     by_rule: dict[str, int] = {}
     for m in radarr.movies():
         if int(m.get("id", -1)) in protected_ids:
@@ -92,22 +93,32 @@ def apply_profile_rules(radarr: Radarr | None = None, dry: bool = True,
             target = prof_ids.get(str(r["profile_name"]).lower())
             if target is None:
                 continue
+            # Match first: a movie that merely happens to sit on this rule's
+            # profile, without matching it, must still be checked against the
+            # rules after it. First MATCH wins, not first profile.
+            if not movie_matches(m, r["match_type"], r["match_value"], tag_ids):
+                continue
             if m.get("qualityProfileId") == target:
-                break  # already correct; first-match-wins stops here
-            if movie_matches(m, r["match_type"], r["match_value"], tag_ids):
-                if not dry:
-                    m["qualityProfileId"] = target
-                    try:
-                        radarr.update_movie(m)
-                    except Exception:  # noqa: BLE001
-                        break
-                assigned += 1
-                key = f"{r['match_type']}={r['match_value']} -> {r['profile_name']}"
-                by_rule[key] = by_rule.get(key, 0) + 1
-                break
+                break  # already correct
+            if not dry:
+                # Re-read before PUT: the library snapshot may be minutes old,
+                # and PUT /movie overwrites tags, monitored, path and more.
+                try:
+                    fresh = radarr.movie(int(m["id"]))
+                    fresh["qualityProfileId"] = target
+                    radarr.update_movie(fresh)
+                except Exception as e:  # noqa: BLE001
+                    failed.append(f"{m.get('title')}: {e}"[:200])
+                    break
+            assigned += 1
+            key = f"{r['match_type']}={r['match_value']} -> {r['profile_name']}"
+            by_rule[key] = by_rule.get(key, 0) + 1
+            break
 
-    db.log_run("assign", True,
-               f"{'DRY: ' if dry else ''}assigned {assigned} movies via "
-               f"{len(rules)} rule(s)")
+    msg = (f"{'DRY: ' if dry else ''}assigned {assigned} movies via "
+           f"{len(rules)} rule(s)")
+    if failed:
+        msg += f"; {len(failed)} update(s) failed: " + "; ".join(failed[:3])
+    db.log_run("assign", not failed, msg[:500])
     return {"assigned": assigned, "rules": len(rules), "by_rule": by_rule,
-            "unknown_profiles": unknown}
+            "unknown_profiles": unknown, "failed": failed}
