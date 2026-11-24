@@ -106,7 +106,11 @@ calls = []
 class ImpRadarr:
     """Fake Radarr whose movie gains a new file once ManualImport runs --
     unless `import_lands` is False, or the command reports `cmd_status`."""
-    def __init__(self, import_lands=True, cmd_status="completed", rejections=()):
+    def __init__(self, import_lands=True, cmd_status="completed", rejections=(),
+                 cand_movie={"id": 42}, feature_gb=9.2, command_raises=False):
+        self.cand_movie = cand_movie
+        self.feature_gb = feature_gb
+        self.command_raises = command_raises
         self.imported = False
         self.import_lands = import_lands
         self.cmd_status = cmd_status
@@ -129,10 +133,10 @@ class ImpRadarr:
         calls.append(("manualimport", did))
         return [{"path": "/downloads/sample.mkv", "size": 40*1024*1024,
                  "quality": {"quality": {"name": "Bluray-1080p"}}, "movieId": 42},
-                {"path": "/downloads/Elemental.mkv", "size": int(9.2*GB),
+                {"path": "/downloads/Elemental.mkv", "size": int(self.feature_gb*GB),
                  "quality": {"quality": {"name": "Bluray-1080p"}},
                  "languages": [{"id": 1, "name": "English"}],
-                 "movie": {"id": 42}, "folderName": "Elemental.2023.1080p",
+                 "movie": self.cand_movie, "folderName": "Elemental.2023.1080p",
                  "releaseGroup": "JBENT", "indexerFlags": 0,
                  "rejections": [{"reason": "Not an upgrade for existing movie "
                                  "file. Existing quality: Remux-2160p. New "
@@ -141,6 +145,8 @@ class ImpRadarr:
     def delete_movie_file(self, fid): calls.append(("delete", fid))
     def command(self, name, **body):
         calls.append(("command", name, body))
+        if self.command_raises:
+            raise RuntimeError("HTTP 500")
         self.imported = True
         return {"id": 99, "name": name, "status": "queued"}
 
@@ -244,8 +250,96 @@ check("grouped members share one rank",
       len({loop._profile_quality_rank(HD_GROUPED)[n]
            for n in ("WEBDL-1080p", "WEBRip-1080p")}) == 1)
 check("current Radarr 'equal or higher preference' wording counts as soft",
-      loop._rejection_is_soft("Existing file on disk has an equal or higher "
-                              "preference: 1 (WEBDL-2160p)"))
+      loop._rejection_is_soft("Queue item has an equal or higher preference: "
+                              "1 (WEBDL-2160p)"))
+check("depth 0 on a grouped top rung offers the WHOLE group (WEBDL not dropped)",
+      loop._tier_ladder(ARCHIVE_4K_GROUPED, "Remux-2160p", 0)
+      == ["WEBDL-2160p|WEBRip-2160p"])
+HD_TWO = {"id": 9, "name": "Archive-HD", "items": [
+    grp(1002, "WEB 1080p", [(3, "WEBDL-1080p"), (15, "WEBRip-1080p")], True),
+    {"quality": {"id": 7, "name": "Bluray-1080p"}, "items": [], "allowed": True}]}
+check("depth counts rank steps, not group members",
+      loop._tier_ladder(HD_TWO, "Remux-2160p", 1)
+      == ["Bluray-1080p", "WEBDL-1080p|WEBRip-1080p"])
+r, tier = loop._pick_release(
+    FakeRadarr([rel("WEBRip-2160p", 15, score=0, seeders=1),
+                rel("WEBDL-2160p", 18, score=1000, seeders=100)]),
+    1, loop._tier_ladder(ARCHIVE_4K_GROUPED, "Remux-2160p", 0),
+    max_bytes=int(60 * GB))
+check("within a group, Radarr's scoring decides (WEBDL cf=1000 beats WEBRip)",
+      tier == "WEBDL-2160p")
+
+print("\n=== 9. force import refuses what isn't provably ours")
+for label, kw in [
+        ("file Radarr couldn't match to any movie (movie: null)", {"cand_movie": None}),
+        ("file matched to a different movie", {"cand_movie": {"id": 7}}),
+        ("incoming file not smaller than the existing one", {"feature_gb": 45})]:
+    calls.clear()
+    res = importer.force_import(ImpRadarr(**kw), STUCK, dry=False)
+    check(f"{label} -> nothing deleted",
+          not res["ok"] and not any(c[0] == "delete" for c in calls))
+calls.clear()
+res = importer.force_import(ImpRadarr(command_raises=True), STUCK, dry=False)
+check("ManualImport request fails after the delete -> recovery warning",
+      not res["ok"] and "Recycle Bin" in res["detail"])
+REVISION = dict(STUCK, statusMessages=[{"title": "x", "messages": [
+    "Not a quality revision upgrade for existing movie file(s)"]}])
+CF = dict(STUCK, statusMessages=[{"title": "x", "messages": [
+    "Not a Custom Format upgrade for existing movie file(s). New: [] (0) do "
+    "not improve on Existing: [HDR] (100)"]}])
+check("same-rank 'revision upgrade' refusal is NOT overridden",
+      importer.stuck_items(QRadarr([REVISION]), {9}) == [])
+check("same-rank 'Custom Format upgrade' refusal is NOT overridden",
+      importer.stuck_items(QRadarr([CF]), {9}) == [])
+IMPORTING = dict(STUCK, trackedDownloadState="importing")
+check("an item already importing is left alone",
+      importer.stuck_items(QRadarr([IMPORTING]), {9}) == [])
+
+print("\n=== 10. sweep accounting")
+class SweepRadarr(ImpRadarr):
+    def media_management(self): return {"recycleBin": "/recycle"}
+    def quality_profiles(self): return [ARCHIVE_HD]
+orig = importer.radarr_from_env
+importer.radarr_from_env = lambda: SweepRadarr(cmd_status="started", import_lands=False)
+db.set_("dry_run", False); db.set_("import_throttle_seconds", 0)
+db.set_("archive_profile_name", "Archive-HD")
+res = importer.run_import_sweep()
+check("an import still running is not counted as imported",
+      res["imported"] == 0 and res["pending"] == 1)
+importer.radarr_from_env = lambda: SweepRadarr(import_lands=False)
+res = importer.run_import_sweep()
+last = db.conn().execute("SELECT ok FROM runs WHERE kind='import' "
+                         "ORDER BY rowid DESC LIMIT 1").fetchone()
+check("a sweep with a failed import is logged as not ok",
+      res["failed"] == 1 and not last["ok"])
+importer.radarr_from_env = orig
+db.set_("dry_run", True)
+
+print("\n=== 11. Radarr client: queue paging and command polling")
+from app import arr
+class PagedRadarr(arr.Radarr):
+    def __init__(self, pages):
+        self.pages = pages; self.FAST_TIMEOUT = 1
+    def get(self, path, params=None, **kw):
+        if path == "queue":
+            return self.pages[min(params["page"], len(self.pages)) - 1]
+        raise AssertionError(path)
+two = PagedRadarr([{"page": 1, "totalRecords": 3, "records": [{"id": 1}, {"id": 2}]},
+                   {"page": 2, "totalRecords": 3, "records": [{"id": 3}]}])
+check("follows pagination", [r["id"] for r in two.queue(page_size=2)] == [1, 2, 3])
+shrunk = PagedRadarr([{"page": 1, "totalRecords": 3, "records": [{"id": 1}, {"id": 2}]},
+                      {"page": 1, "totalRecords": 2, "records": [{"id": 1}, {"id": 2}]}])
+check("a queue that shrank mid-walk yields no duplicates",
+      [r["id"] for r in shrunk.queue(page_size=2)] == [1, 2])
+class FlakyCmd(arr.Radarr):
+    def __init__(self): self.n = 0
+    def command_status(self, cid):
+        self.n += 1
+        if self.n == 1:
+            raise arr.ArrError("GET command/1: HTTP 502")
+        return {"id": cid, "status": "completed"}
+check("a transient poll error doesn't end the wait",
+      FlakyCmd().wait_for_command(1, timeout=5, interval=0)["status"] == "completed")
 
 print()
 print("\033[91m%d FAILURE(S)\033[0m" % len(fails) if fails else "\033[92mall passed\033[0m")

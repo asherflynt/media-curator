@@ -45,8 +45,8 @@ def _triggers(s: dict) -> dict:
     on the next container start, where it would stop the app booting)."""
     def minutes(key: str) -> int:
         v = int(float(s[key]))
-        if v < 1:
-            raise ValueError(f"{key} must be at least 1 minute")
+        if not 1 <= v <= 525600:
+            raise ValueError(f"{key} must be between 1 and 525600 minutes")
         return v
     hour = int(float(s["audit_cron_hour"]))
     if not 0 <= hour <= 23:
@@ -64,7 +64,7 @@ def _schedule() -> None:
     s = db.all_settings()
     try:
         trig = _triggers(s)
-    except (KeyError, TypeError, ValueError) as e:
+    except (KeyError, TypeError, ValueError, OverflowError) as e:
         # A value stored by an older build, or edited into the DB by hand. Run
         # on the defaults rather than refuse to start.
         db.log_run("schedule", False, f"invalid schedule setting ({e}); "
@@ -85,11 +85,17 @@ def _schedule() -> None:
                           replace_existing=True)
 
 
+# Every audit -- scheduled, manual, webhook -- runs under this one lock: two at
+# once race on the findings table's unique key.
+_audit_lock = threading.Lock()
+
+
 def _safe_audit() -> None:
-    try:
-        audit.run_audit()
-    except Exception as e:  # noqa: BLE001
-        db.log_run("audit", False, f"{e}\n{traceback.format_exc()[:500]}")
+    with _audit_lock:
+        try:
+            audit.run_audit()
+        except Exception as e:  # noqa: BLE001
+            db.log_run("audit", False, f"{e}\n{traceback.format_exc()[:500]}")
 
 
 def _safe_loop() -> None:
@@ -237,7 +243,7 @@ async def settings_save(request: Request):
                 **{k: str(form[k]).strip() for k in _SCHEDULE_KEYS if k in form}}
     try:
         _triggers(proposed)
-    except (KeyError, TypeError, ValueError) as e:
+    except (KeyError, TypeError, ValueError, OverflowError) as e:
         return RedirectResponse(
             "/settings?error=" + quote(f"Schedule not saved: {e}"), status_code=303)
     for key, default in db.DEFAULTS.items():
@@ -358,7 +364,8 @@ def audit_page(request: Request):
 @app.post("/audit/run")
 def audit_run():
     try:
-        return JSONResponse(audit.run_audit())
+        with _audit_lock:
+            return JSONResponse(audit.run_audit())
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -461,26 +468,33 @@ def api_status():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-_audit_lock = threading.Lock()
-_audit_rerun = threading.Event()
+_webhook_state = threading.Lock()  # guards the two flags below, briefly
+_webhook_running = False
+_webhook_rerun = False
 
 
 def _webhook_audit() -> None:
     """Coalesced audit for import webhooks. A season pack fires one webhook per
-    episode; at most one audit runs at a time, and any number of webhooks that
-    arrive meanwhile collapse into a single follow-up run."""
-    _audit_rerun.set()
-    if not _audit_lock.acquire(blocking=False):
-        return  # the running audit will see the flag and go again
-    try:
-        while _audit_rerun.is_set():
-            _audit_rerun.clear()
+    episode; one worker runs at a time, and any number of webhooks that arrive
+    meanwhile collapse into a single follow-up run. Both flags change under
+    one lock, so a webhook landing just as the worker finishes is never lost."""
+    global _webhook_running, _webhook_rerun
+    with _webhook_state:
+        _webhook_rerun = True
+        if _webhook_running:
+            return  # the running worker will see the flag and go again
+        _webhook_running = True
+    while True:
+        with _webhook_state:
+            if not _webhook_rerun:
+                _webhook_running = False
+                return
+            _webhook_rerun = False
+        with _audit_lock:
             try:
                 audit.run_audit(tag=True)
             except Exception as e:  # noqa: BLE001
                 db.log_run("audit", False, f"webhook audit: {e}"[:500])
-    finally:
-        _audit_lock.release()
 
 
 @app.api_route("/webhook/import", methods=["POST", "PUT"])

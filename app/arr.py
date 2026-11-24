@@ -105,15 +105,24 @@ class Radarr(ArrClient):
         """Every queue record, following pagination (a single page silently
         truncated large queues)."""
         out: list[dict] = []
+        seen: set = set()
         page = 1
         while True:
             q = self.get("queue", params={
                 "page": page, "pageSize": page_size,
                 "includeMovie": "true" if include_movie else "false"}) or {}
             recs = q.get("records") or []
-            out.extend(recs)
+            for r in recs:
+                # Radarr clamps an out-of-range page back to the last real one,
+                # so a queue that shrank mid-walk can repeat records.
+                key = r.get("id") or (r.get("downloadId"), r.get("movieId"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(r)
             total = int(q.get("totalRecords") or 0)
-            if not recs or len(out) >= total or page >= 100:
+            if (len(recs) < page_size or len(out) >= total
+                    or int(q.get("page") or page) != page or page >= 100):
                 return out
             page += 1
 
@@ -123,22 +132,23 @@ class Radarr(ArrClient):
         whole basis of the manifest's 'a demotion can be reversed' claim."""
         return self.delete(f"moviefile/{int(movie_file_id)}")
 
-    def manual_import_candidates(self, download_id: str,
-                                 movie_id: int | None = None) -> list[dict]:
+    def manual_import_candidates(self, download_id: str) -> list[dict]:
         """What Radarr's manual-import dialog would show for a finished
         download, including its own per-file rejections (importer.py decides
-        which of those it is safe to override)."""
-        params: dict[str, Any] = {"downloadId": download_id,
-                                  "filterExistingFiles": "false"}
-        if movie_id:
-            params["movieId"] = int(movie_id)
-        return self.get("manualimport", params=params) or []
+        which of those it is safe to override).
+
+        Deliberately no movieId: passing one makes Radarr skip its own
+        matching and stamp that movie onto every file, which would defeat the
+        wrong-movie check in importer.force_import."""
+        return self.get("manualimport", params={
+            "downloadId": download_id, "filterExistingFiles": "false"}) or []
 
     def command(self, name: str, **body: Any) -> Any:
         return self.post("command", json={"name": name, **body})
 
     def command_status(self, command_id: int) -> dict:
-        return self.get(f"command/{int(command_id)}") or {}
+        return self.get(f"command/{int(command_id)}",
+                        timeout=self.FAST_TIMEOUT) or {}
 
     def wait_for_command(self, command_id: int, timeout: float = 300.0,
                          interval: float = 3.0) -> dict:
@@ -149,7 +159,15 @@ class Radarr(ArrClient):
         deadline = time.monotonic() + timeout
         st: dict = {}
         while True:
-            st = self.command_status(command_id)
+            try:
+                st = self.command_status(command_id) or st
+            except ArrError:
+                # A transient blip (proxy 502, socket reset) is not an import
+                # failure; keep polling until the deadline.
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(interval)
+                continue
             if str(st.get("status") or "").lower() in (
                     "completed", "failed", "aborted", "cancelled", "orphaned"):
                 return st

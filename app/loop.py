@@ -246,17 +246,30 @@ def _tier_ladder(profile: dict, current_tier: str | None, depth: int) -> list[st
     And `depth` caps how far it falls -- depth 0 restores the old
     top-tier-or-nothing behaviour, so this is opt-out.
     """
-    ladder = [t for t in reversed(_profile_allowed(profile)) if t]
+    # One rung per allowed rank bucket, best first. A quality group is ONE rung
+    # ("WEBDL-2160p|WEBRip-2160p"): Radarr ranks its members as equals, so the
+    # ladder neither counts them as separate steps nor prefers one by position.
+    rungs = [(i, b["names"]) for i, b in enumerate(_profile_buckets(profile))
+             if b["allowed"] and b["names"]]
+    rungs.reverse()
     if current_tier:
-        rank = {k.lower(): v for k, v in _profile_quality_rank(profile).items()}
-        lowered = [t.lower() for t in ladder]
-        if current_tier.lower() in lowered:
-            # Strictly below the current file's rank: a grouped peer (WEBRip
-            # next to a WEBDL in "WEB 1080p") is an equal, not a demotion.
-            cur = rank.get(current_tier.lower())
-            ladder = [t for t in ladder[lowered.index(current_tier.lower()) + 1:]
-                      if cur is None or rank.get(t.lower(), -1) < cur]
-    return ladder[:max(1, int(depth) + 1)]
+        cur = None
+        for i, names in rungs:
+            if current_tier.lower() in {n.lower() for n in names}:
+                cur = i
+        if cur is not None:
+            # Strictly below the current file: an equal-rank peer is not a
+            # demotion.
+            rungs = [(i, names) for i, names in rungs if i < cur]
+    return [TIER_SEP.join(names) for _, names in rungs][:max(1, int(depth) + 1)]
+
+
+TIER_SEP = "|"
+
+
+def rung_tiers(rung: str) -> list[str]:
+    """The quality names on one ladder rung (one, or a group's members)."""
+    return [t for t in rung.split(TIER_SEP) if t]
 
 
 def _pick_release(radarr: Radarr, movie_id: int, tiers: list[str],
@@ -280,10 +293,13 @@ def _pick_release(radarr: Radarr, movie_id: int, tiers: list[str],
         return None, None
 
     for tier in tiers:
+        # A grouped rung matches any member; Radarr's own scoring decides
+        # between them below, as its DownloadDecisionComparer does.
+        names = {t.lower() for t in rung_tiers(tier)}
         matches = []
         for r in releases:
             name = ((r.get("quality") or {}).get("quality") or {}).get("name", "")
-            if name.lower() != tier.lower():
+            if name.lower() not in names:
                 continue
             if all(_rejection_is_soft(x) for x in (r.get("rejections") or [])):
                 # A replacement no smaller than what's on disk reclaims nothing;
@@ -296,7 +312,9 @@ def _pick_release(radarr: Radarr, movie_id: int, tiers: list[str],
             # Prefer Radarr's own scoring, then availability.
             matches.sort(key=lambda r: (-(r.get("customFormatScore") or 0),
                                         -(r.get("seeders") or 0)))
-            return matches[0], tier
+            best = matches[0]
+            return best, ((best.get("quality") or {}).get("quality") or {}).get(
+                "name") or tier
     return None, None
 
 
@@ -363,7 +381,8 @@ def run_once(force: bool = False) -> dict:
                              detail=f"no release available in {'/'.join(ladder)}")
             continue
 
-        fallback = "" if tier == ladder[0] else f" (fell back from {ladder[0]})"
+        fallback = ("" if tier.lower() in {t.lower() for t in rung_tiers(ladder[0])}
+                    else f" (fell back from {ladder[0]})")
         aid = db.record_action(
             movie_id=c.id, title=c.title, action="demote", old_tier=c.tier,
             old_size=c.size, old_profile_id=c.movie.get("qualityProfileId"),
@@ -561,7 +580,8 @@ def _grab_profile(radarr: Radarr, profile: dict, movies: list[dict],
                              detail=f"{profile['name']}: no release available "
                                     f"in {'/'.join(ladder)}")
             continue
-        fallback = "" if tier == ladder[0] else f" (fell back from {ladder[0]})"
+        fallback = ("" if tier.lower() in {t.lower() for t in rung_tiers(ladder[0])}
+                    else f" (fell back from {ladder[0]})")
         aid = db.record_action(movie_id=m["id"], title=m.get("title"),
                                action="demote", old_tier=old_tier, old_size=old_size,
                                new_profile_id=profile["id"],
