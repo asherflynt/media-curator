@@ -68,9 +68,9 @@
       <td style="text-align:right">
         <form method="post" action="/blocklist/add" style="display:inline">
           <input type="hidden" name="movie_id" value="{{ c.id }}">
-          <input type="hidden" name="tmdb_id" value="{{ c.tmdb }}">
+          <input type="hidden" name="tmdb_id" value="{{ c.tmdb or '' }}">
           <input type="hidden" name="title" value="{{ c.title }}">
-          <input type="hidden" name="year" value="{{ c.movie.year }}">
+          <input type="hidden" name="year" value="{{ c.movie.year or '' }}">
           <input type="hidden" name="reason" value="never demote">
           <input type="hidden" name="back" value="/candidates">
           <button type="submit" class="ghost" title="Never demote this title">Block</button>
